@@ -40,20 +40,32 @@ std::string LlamaVulkan::getGPUInfo() {
     return info.str();
 }
 
-void LlamaVulkan::loadModel(const char* model_path, float minP, float temperature, 
+void LlamaVulkan::loadModel(const char* model_path, 
+                            float temperature, int topK, float topP, float minP, float repeatPenalty,
                             bool storeChats, long contextSize, const char* chatTemplate, 
                             int nThreads, bool useMmap, bool useMlock, 
-                            bool useGPU, int gpuLayers) {
-    LOGi("Loading model with Vulkan support:"
+                            bool useGPU, int gpuLayers,
+                            bool flashAttention, int kvCacheType) {
+    LOGi("Loading model:"
          "\n\tmodel_path = %s"
-         "\n\tminP = %f"
-         "\n\ttemperature = %f"
-         "\n\tstoreChats = %d"
+         "\n\ttemperature = %.2f"
+         "\n\ttopK = %d"
+         "\n\ttopP = %.2f"
+         "\n\tminP = %.2f"
+         "\n\trepeatPenalty = %.2f"
          "\n\tcontextSize = %li"
          "\n\tnThreads = %d"
-         "\n\tuseGPU = %d"
-         "\n\tgpuLayers = %d",
-         model_path, minP, temperature, storeChats, contextSize, nThreads, useGPU, gpuLayers);
+         "\n\tflashAttention = %d"
+         "\n\tkvCacheType = %d",
+         model_path, temperature, topK, topP, minP, repeatPenalty, 
+         contextSize, nThreads, flashAttention, kvCacheType);
+    
+    // Store sampling params for sampler creation
+    _temperature = temperature;
+    _topK = topK;
+    _topP = topP;
+    _minP = minP;
+    _repeatPenalty = repeatPenalty;
 
     // Load all available backends (including Vulkan if available)
     ggml_backend_load_all();
@@ -95,17 +107,66 @@ void LlamaVulkan::loadModel(const char* model_path, float minP, float temperatur
     ctx_params.n_threads = nThreads;
     ctx_params.no_perf = true;
     
+    // Flash Attention - reduces memory usage, recommended for mobile
+    ctx_params.flash_attn_type = flashAttention ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    if (flashAttention) {
+        LOGi("Flash Attention enabled");
+    }
+    
+    // KV Cache quantization - reduces memory usage
+    // kvCacheType: 1=F16, 8=Q8_0, 2=Q4_0
+    ctx_params.type_k = static_cast<ggml_type>(kvCacheType);
+    ctx_params.type_v = static_cast<ggml_type>(kvCacheType);
+    const char* kvTypeName = (kvCacheType == 1) ? "F16" : (kvCacheType == 8) ? "Q8_0" : "Q4_0";
+    LOGi("KV Cache type: %s", kvTypeName);
+    
     _ctx = llama_init_from_model(_model, ctx_params);
     if (!_ctx) {
         LOGe("llama_init_from_model() returned null");
         throw std::runtime_error("llama_init_from_model() returned null");
     }
 
-    // Create sampler
+    // Create sampler chain - order matters!
+    // Filter first (top-k, top-p, min-p), then adjust (temp, penalties), then sample
     llama_sampler_chain_params sampler_params = llama_sampler_chain_default_params();
     sampler_params.no_perf = true;
     _sampler = llama_sampler_chain_init(sampler_params);
+    
+    // 1. Top-K: Keep only top K tokens (0 = disabled)
+    if (topK > 0) {
+        llama_sampler_chain_add(_sampler, llama_sampler_init_top_k(topK));
+        LOGi("Sampler: Top-K = %d", topK);
+    }
+    
+    // 2. Top-P (nucleus): Keep tokens covering P probability mass
+    if (topP < 1.0f) {
+        llama_sampler_chain_add(_sampler, llama_sampler_init_top_p(topP, 1));
+        LOGi("Sampler: Top-P = %.2f", topP);
+    }
+    
+    // 3. Min-P: Remove tokens with prob < minP * max_prob
+    if (minP > 0.0f) {
+        llama_sampler_chain_add(_sampler, llama_sampler_init_min_p(minP, 1));
+        LOGi("Sampler: Min-P = %.2f", minP);
+    }
+    
+    // 4. Temperature: Adjust randomness
     llama_sampler_chain_add(_sampler, llama_sampler_init_temp(temperature));
+    LOGi("Sampler: Temperature = %.2f", temperature);
+    
+    // 5. Repeat penalty: Penalize repeated tokens
+    if (repeatPenalty != 1.0f) {
+        // Parameters: last_n tokens to check, repeat_penalty, frequency_penalty, presence_penalty
+        llama_sampler_chain_add(_sampler, llama_sampler_init_penalties(
+            64,              // last_n: look back 64 tokens
+            repeatPenalty,   // repeat_penalty
+            0.0f,            // frequency_penalty (disabled)
+            0.0f             // presence_penalty (disabled)
+        ));
+        LOGi("Sampler: Repeat Penalty = %.2f", repeatPenalty);
+    }
+    
+    // 6. Final sampling with random seed
     llama_sampler_chain_add(_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     _formattedMessages = std::vector<char>(llama_n_ctx(_ctx));

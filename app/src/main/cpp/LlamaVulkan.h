@@ -35,6 +35,13 @@ class LlamaVulkan {
     int64_t _responseGenerationTime = 0;
     long    _responseNumTokens = 0;
     int _nCtxUsed = 0;
+    
+    // Sampling parameters
+    float _temperature = 0.7f;
+    int _topK = 40;
+    float _topP = 0.9f;
+    float _minP = 0.05f;
+    float _repeatPenalty = 1.1f;
 
     bool _isValidUtf8(const char* response);
 
@@ -44,9 +51,11 @@ public:
      * @param useGPU If true, attempt to use Vulkan GPU. Falls back to CPU if unavailable.
      * @param gpuLayers Number of layers to offload to GPU (-1 = all)
      */
-    void loadModel(const char* modelPath, float minP, float temperature, bool storeChats, 
-                   long contextSize, const char* chatTemplate, int nThreads, 
-                   bool useMmap, bool useMlock, bool useGPU, int gpuLayers);
+    void loadModel(const char* modelPath, 
+                   float temperature, int topK, float topP, float minP, float repeatPenalty,
+                   bool storeChats, long contextSize, const char* chatTemplate, 
+                   int nThreads, bool useMmap, bool useMlock, bool useGPU, int gpuLayers,
+                   bool flashAttention, int kvCacheType);
 
     void addChatMessage(const char* message, const char* role);
     float getResponseGenerationTime() const;

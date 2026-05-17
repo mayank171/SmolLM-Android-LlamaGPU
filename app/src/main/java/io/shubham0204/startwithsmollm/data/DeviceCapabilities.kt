@@ -68,13 +68,14 @@ object DeviceCapabilities {
     
     private fun calculateMaxContextSize(ramGB: Float, tier: DeviceTier): Int {
         // Context size affects KV cache memory usage
-        // Larger context = more memory needed
+        // With Q8_0 KV cache quantization, we can use ~2x the context
+        // compared to F16 (default) for the same memory
         return when {
-            ramGB >= 8 -> 2048
-            ramGB >= 6 -> 1536
-            ramGB >= 4 -> 1024
-            ramGB >= 3 -> 768
-            else -> 512
+            ramGB >= 8 -> 8192   // 8GB+ (S24, Pixel 8) → 8K context
+            ramGB >= 6 -> 4096   // 6-8GB → 4K context
+            ramGB >= 4 -> 2048   // 4-6GB → 2K context
+            ramGB >= 3 -> 1024   // 3-4GB → 1K context
+            else -> 512          // <3GB → 512 context
         }
     }
     
@@ -96,12 +97,14 @@ object DeviceCapabilities {
     
     fun getContextSizeForModel(model: ModelInfo, profile: DeviceProfile): Int {
         // Adjust context based on model size and device capability
+        // With Q8_0 KV cache, we have more headroom
         val baseContext = profile.maxContextSize
         
-        // Larger models need more memory, so reduce context
+        // Larger models need more memory for weights, so reduce context
+        // But with Q8_0 KV cache, the reduction is less severe
         val contextMultiplier = when {
-            model.sizeInMB >= 1500 -> 0.5f  // Gemma 2B - half context
-            model.sizeInMB >= 1000 -> 0.75f // Qwen 1.5B
+            model.sizeInMB >= 1500 -> 0.6f  // Gemma 2B - 60% context (was 50%)
+            model.sizeInMB >= 1000 -> 0.8f  // Qwen 1.5B - 80% context (was 75%)
             else -> 1.0f                     // Smaller models - full context
         }
         
