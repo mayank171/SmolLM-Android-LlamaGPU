@@ -19,6 +19,24 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        
+        // Native build for LlamaGPU with Vulkan support (using pre-built libs)
+        ndk {
+            abiFilters += listOf("arm64-v8a")  // Only arm64 for now
+        }
+        externalNativeBuild {
+            cmake {
+                arguments += "-DCMAKE_BUILD_TYPE=Release"
+            }
+        }
+    }
+    
+    // Enable native build (comment out to disable GPU support and use original SmolLM only)
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
@@ -36,6 +54,10 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+
+    androidResources {
+        noCompress += "gguf"
     }
 }
 

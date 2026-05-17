@@ -7,9 +7,20 @@
 /.idea/workspace.xml
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
+/.idea/deploymentTargetSelector.xml
+/.idea/vcs.xml
 .DS_Store
 /build
 /captures
 .externalNativeBuild
 .cxx
 local.properties
+
+# llama.cpp - clone separately if needed for rebuilding native libs
+llama.cpp/
+
+# SmolChat clone (not needed in repo)
+SmolChat-Android/
+
+# Large model files
+*.gguf
