@@ -7,23 +7,31 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 
 /**
- * LlamaGPU - GPU-accelerated LLM inference using Vulkan
+ * KV Cache quantization types for memory optimization
+ * Lower precision = less memory, minimal quality impact
+ */
+enum class KVCacheType(val ggmlType: Int) {
+    F16(1),    // GGML_TYPE_F16 - Default, best quality
+    Q8_0(8),   // GGML_TYPE_Q8_0 - 50% memory savings, minimal quality loss
+    Q4_0(2),   // GGML_TYPE_Q4_0 - 75% memory savings, slight quality loss
+}
+
+/**
+ * LlamaGPU - Optimized LLM inference using llama.cpp
  * 
- * This is a separate implementation from SmolLM that adds:
- * - Vulkan GPU acceleration support
- * - Fallback to CPU if GPU not available
- * - GPU device selection
+ * Features:
+ * - Flash Attention for memory efficiency
+ * - KV Cache quantization (F16/Q8_0/Q4_0)
+ * - Configurable threading
+ * - Streaming responses via Kotlin Flow
  * 
  * Usage:
  * ```kotlin
  * val llamaGPU = LlamaGPU()
- * 
- * // Check if GPU is available
- * if (LlamaGPU.isVulkanAvailable()) {
- *     llamaGPU.load(modelPath, params, useGPU = true)
- * } else {
- *     // Fall back to original SmolLM
- * }
+ * llamaGPU.load(modelPath, LlamaGPU.InferenceParams(
+ *     flashAttention = true,
+ *     kvCacheType = KVCacheType.Q8_0  // For low-memory devices
+ * ))
  * ```
  */
 class LlamaGPU {
@@ -69,16 +77,26 @@ class LlamaGPU {
     }
     
     data class InferenceParams(
-        val minP: Float = 0.05f,
-        val temperature: Float = 0.7f,
+        // Sampling parameters - affect answer quality
+        val temperature: Float = 0.7f,      // Randomness (0.1=focused, 1.5=creative)
+        val topK: Int = 40,                 // Keep top K tokens (0=disabled)
+        val topP: Float = 0.9f,             // Keep tokens covering P probability mass
+        val minP: Float = 0.05f,            // Remove tokens < minP * top_prob
+        val repeatPenalty: Float = 1.1f,    // Penalize repetition (1.0=off, 1.2=strong)
+        // Context settings
         val storeChats: Boolean = true,
         val contextSize: Long? = null,
         val chatTemplate: String? = null,
+        // Threading
         val numThreads: Int = 4,
         val useMmap: Boolean = true,
         val useMlock: Boolean = false,
-        val useGPU: Boolean = false,  // Disabled - Vulkan crashes on Adreno GPUs
-        val gpuLayers: Int = 0
+        // GPU (disabled - Vulkan crashes on Adreno)
+        val useGPU: Boolean = false,
+        val gpuLayers: Int = 0,
+        // Performance optimizations
+        val flashAttention: Boolean = true,
+        val kvCacheType: KVCacheType = KVCacheType.F16
     )
     
     /**
@@ -90,8 +108,11 @@ class LlamaGPU {
     ) = withContext(Dispatchers.IO) {
         nativePtr = loadModel(
             modelPath,
-            params.minP,
             params.temperature,
+            params.topK,
+            params.topP,
+            params.minP,
+            params.repeatPenalty,
             params.storeChats,
             params.contextSize ?: 2048L,
             params.chatTemplate ?: "",
@@ -99,7 +120,9 @@ class LlamaGPU {
             params.useMmap,
             params.useMlock,
             params.useGPU,
-            params.gpuLayers
+            params.gpuLayers,
+            params.flashAttention,
+            params.kvCacheType.ggmlType
         )
     }
     
@@ -233,8 +256,11 @@ class LlamaGPU {
     // Native methods
     private external fun loadModel(
         modelPath: String,
-        minP: Float,
         temperature: Float,
+        topK: Int,
+        topP: Float,
+        minP: Float,
+        repeatPenalty: Float,
         storeChats: Boolean,
         contextSize: Long,
         chatTemplate: String,
@@ -242,7 +268,9 @@ class LlamaGPU {
         useMmap: Boolean,
         useMlock: Boolean,
         useGPU: Boolean,
-        gpuLayers: Int
+        gpuLayers: Int,
+        flashAttention: Boolean,
+        kvCacheType: Int
     ): Long
     
     private external fun isUsingGPU(modelPtr: Long): Boolean

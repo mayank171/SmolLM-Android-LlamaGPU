@@ -3,8 +3,9 @@ package io.shubham0204.startwithsmollm
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import io.shubham0204.smollm.SmolLM
 import io.shubham0204.smollm.GGUFReader
+import io.shubham0204.startwithsmollm.gpu.LlamaGPU
+import io.shubham0204.startwithsmollm.gpu.KVCacheType
 import io.shubham0204.startwithsmollm.data.AvailableModels
 import io.shubham0204.startwithsmollm.data.DeviceCapabilities
 import io.shubham0204.startwithsmollm.data.DeviceProfile
@@ -88,7 +89,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private val _appStateFlow = MutableStateFlow(AppState())
     val appStateFlow: StateFlow<AppState> = _appStateFlow
 
-    private val smolLM = SmolLM()
+    private val llamaGPU = LlamaGPU()
     private var currentModelPath: String = ""
     private var currentModel: ModelInfo? = null
     private var downloadJob: Job? = null
@@ -155,7 +156,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private fun calculateContextUsage(): Int {
         // Use REAL token count from llama.cpp instead of estimation!
         return try {
-            val actualTokensUsed = smolLM.getContextLengthUsed()
+            val actualTokensUsed = llamaGPU.getContextLengthUsed()
             ((actualTokensUsed.toFloat() / maxContextSize) * 100).toInt().coerceIn(0, 100)
         } catch (e: Exception) {
             // Fallback to estimation if model not loaded
@@ -165,7 +166,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     
     private fun getRealContextUsage(): Int {
         return try {
-            smolLM.getContextLengthUsed()
+            llamaGPU.getContextLengthUsed()
         } catch (e: Exception) {
             estimatedTokenCount
         }
@@ -267,6 +268,9 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private fun backToModelSelection() {
+        // Close the model to free resources
+        llamaGPU.close()
+        
         _appStateFlow.update { state ->
             state.copy(
                 currentScreen = AppScreen.MODEL_SELECTION,
@@ -326,7 +330,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 }
                 
                 // getResponse handles adding user message internally
-                val llmResponse = smolLM.getResponse(query)
+                val llmResponse = llamaGPU.getResponse(query)
                 
                 // Add tokens for assistant response
                 estimatedTokenCount += estimateTokens(llmResponse)
@@ -356,7 +360,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     
                     // Retry the query after trimming
                     try {
-                        val retryResponse = smolLM.getResponse(query)
+                        val retryResponse = llamaGPU.getResponse(query)
                         estimatedTokenCount += estimateTokens(retryResponse)
                         
                         withContext(Dispatchers.Main) {
@@ -429,9 +433,9 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     val deviceOptimalContext = DeviceCapabilities.getContextSizeForModel(model, deviceProfile)
                     val safeContextSize = minOf(model.maxContextSize.toLong(), deviceOptimalContext.toLong())
                     
-                    smolLM.load(
+                    llamaGPU.load(
                         modelPath = currentModelPath,
-                        params = SmolLM.InferenceParams(
+                        params = LlamaGPU.InferenceParams(
                             minP = 0.05f,
                             temperature = 0.7f,
                             storeChats = model.supportsMultiTurn,
@@ -439,13 +443,16 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                             chatTemplate = chatTemplate,
                             numThreads = deviceProfile.optimalThreads,
                             useMmap = true,
-                            useMlock = deviceProfile.deviceTier == DeviceTier.HIGH
+                            useMlock = deviceProfile.deviceTier == DeviceTier.HIGH,
+                            // Performance optimizations
+                            flashAttention = true,
+                            kvCacheType = KVCacheType.Q8_0  // 50% memory savings!
                         )
                     )
                     
                     // Re-add system prompt for non-Gemma models
                     if (!model.id.contains("gemma")) {
-                        smolLM.addSystemPrompt("You are a helpful and intelligent AI assistant. Answer questions clearly and concisely.")
+                        llamaGPU.addSystemPrompt("You are a helpful and intelligent AI assistant. Answer questions clearly and concisely.")
                     }
                     
                     // Re-add the last exchange to maintain some context continuity
@@ -454,8 +461,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                         val lastUserMsg = trimmedMessages.lastOrNull { it.userRole == UserRole.HUMAN }
                         val lastAssistantMsg = trimmedMessages.lastOrNull { it.userRole == UserRole.LLM }
                         
-                        lastUserMsg?.let { smolLM.addUserMessage(it.content) }
-                        lastAssistantMsg?.let { smolLM.addAssistantMessage(it.content) }
+                        lastUserMsg?.let { llamaGPU.addUserMessage(it.content) }
+                        lastAssistantMsg?.let { llamaGPU.addAssistantMessage(it.content) }
                     }
                     
                     val newUsage = calculateContextUsage()
@@ -490,11 +497,11 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 // Use device-optimized thread count
                 val optimalThreads = deviceProfile.optimalThreads
                 
-                android.util.Log.d("SmolLM", "Loading ${model.name}: threads=$optimalThreads, context=$safeContextSize")
+                android.util.Log.d("SmolLM", "Loading ${model.name}: threads=$optimalThreads, context=$safeContextSize, kvCache=Q8_0, flashAttn=true")
                 
-                smolLM.load(
+                llamaGPU.load(
                     modelPath = currentModelPath,
-                    params = SmolLM.InferenceParams(
+                    params = LlamaGPU.InferenceParams(
                         minP = 0.05f,
                         temperature = 0.7f,
                         storeChats = model.supportsMultiTurn,
@@ -502,12 +509,15 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                         chatTemplate = chatTemplate,
                         numThreads = optimalThreads,
                         useMmap = true,
-                        useMlock = deviceProfile.deviceTier == DeviceTier.HIGH
+                        useMlock = deviceProfile.deviceTier == DeviceTier.HIGH,
+                        // Performance optimizations - key for larger context!
+                        flashAttention = true,
+                        kvCacheType = KVCacheType.Q8_0  // 50% memory savings, enables 2x context
                     )
                 )
                 // Gemma models don't support system prompts in the traditional way
                 if (!model.id.contains("gemma")) {
-                    smolLM.addSystemPrompt("You are a helpful and intelligent AI assistant. Answer questions clearly and concisely.")
+                    llamaGPU.addSystemPrompt("You are a helpful and intelligent AI assistant. Answer questions clearly and concisely.")
                 }
                 
                 withContext(Dispatchers.Main) {

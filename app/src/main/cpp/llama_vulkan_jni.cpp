@@ -25,10 +25,12 @@ Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_00024Companion_getGPUInfoNative
 extern "C" JNIEXPORT jlong JNICALL
 Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_loadModel(
     JNIEnv* env, jobject thiz, 
-    jstring modelPath, jfloat minP, jfloat temperature, 
+    jstring modelPath, 
+    jfloat temperature, jint topK, jfloat topP, jfloat minP, jfloat repeatPenalty,
     jboolean storeChats, jlong contextSize, jstring chatTemplate, 
     jint nThreads, jboolean useMmap, jboolean useMlock,
-    jboolean useGPU, jint gpuLayers) {
+    jboolean useGPU, jint gpuLayers,
+    jboolean flashAttention, jint kvCacheType) {
     
     jboolean isCopy = true;
     const char* modelPathCstr = env->GetStringUTFChars(modelPath, &isCopy);
@@ -38,8 +40,11 @@ Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_loadModel(
 
     try {
         llamaVulkan->loadModel(
-            modelPathCstr, minP, temperature, storeChats, contextSize, 
-            chatTemplateCstr, nThreads, useMmap, useMlock, useGPU, gpuLayers
+            modelPathCstr, 
+            temperature, topK, topP, minP, repeatPenalty,
+            storeChats, contextSize, chatTemplateCstr, 
+            nThreads, useMmap, useMlock, useGPU, gpuLayers,
+            flashAttention, kvCacheType
         );
     } catch (std::exception& error) {
         env->ReleaseStringUTFChars(modelPath, modelPathCstr);
