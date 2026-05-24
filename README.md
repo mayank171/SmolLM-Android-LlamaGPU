@@ -11,8 +11,9 @@ An Android application for running Small Language Models (SLMs) locally on your 
 - 🤖 **Run LLMs locally** - No internet required for inference
 - 📱 **Model Selection** - Download and manage multiple GGUF models
 - 💬 **Chat Interface** - Clean Material 3 chat UI with markdown support
-- 📊 **Benchmark Screen** - Compare inference performance between backends
-- 🔄 **Dual Backend Support** - SmolLM (original) and LlamaGPU (custom JNI)
+- � **RAG Support** - Upload documents and chat with your data
+- � **Benchmark Screen** - Test inference performance
+- ⚡ **Optimized Inference** - Flash Attention, KV Cache quantization, device-adaptive context
 
 ## Architecture
 
@@ -34,6 +35,9 @@ The LlamaGPU backend provides:
 ```
 app/
 ├── src/main/
+│   ├── assets/                 # RAG embedding model
+│   │   ├── all-MiniLM-L6-v2.onnx
+│   │   └── vocab.txt
 │   ├── cpp/                    # Native C++ code
 │   │   ├── CMakeLists.txt      # CMake build config
 │   │   ├── LlamaVulkan.cpp     # llama.cpp wrapper
@@ -42,18 +46,20 @@ app/
 │   ├── java/.../
 │   │   ├── gpu/
 │   │   │   └── LlamaGPU.kt     # Kotlin wrapper for native lib
+│   │   ├── rag/                # RAG implementation
+│   │   │   ├── RagEngine.kt    # Main RAG orchestration
+│   │   │   ├── EmbeddingModel.kt # ONNX embeddings
+│   │   │   ├── VectorDatabase.kt # Vector storage & search
+│   │   │   ├── TextChunker.kt  # Document chunking
+│   │   │   └── DocumentParser.kt # File parsing
 │   │   ├── ui/
 │   │   │   ├── BenchmarkScreen.kt
+│   │   │   ├── RagScreen.kt    # Document management
 │   │   │   ├── ModelSelectionScreen.kt
 │   │   │   └── MarkdownText.kt
 │   │   ├── MainActivity.kt
 │   │   └── MainActivityViewModel.kt
 │   └── jniLibs/arm64-v8a/      # Pre-built native libraries
-│       ├── libggml-base.so
-│       ├── libggml-cpu.so
-│       ├── libggml.so
-│       ├── libllama.so
-│       └── libllama-common.so
 └── libs/
     └── smollm-debug.aar        # Original SmolLM library
 ```
@@ -139,13 +145,36 @@ llamaGPU.getResponseAsFlow("Hello, how are you?")
 llamaGPU.close()
 ```
 
+### RAG (Retrieval Augmented Generation)
+
+Chat with your documents! The app supports uploading files and using them as context for conversations.
+
+**Supported file types:**
+- PDF documents
+- Text files (.txt)
+- Markdown files (.md)
+- JSON files
+
+**How to use:**
+1. Load a model and start a chat
+2. Tap the 📚 (documents) icon in the chat screen
+3. Upload your documents
+4. Enable RAG toggle in the chat
+5. Ask questions about your documents!
+
+**How it works:**
+- Documents are split into chunks
+- Each chunk is embedded using an ONNX model (all-MiniLM-L6-v2)
+- When you ask a question, relevant chunks are retrieved via semantic search
+- Retrieved context is injected into the prompt for accurate answers
+
 ### Benchmark
 
-The app includes a benchmark screen to compare SmolLM vs LlamaGPU performance:
+Test inference performance:
 
 1. Load a model from the Model Selection screen
 2. Tap the ⚡ (speedometer) icon in the chat screen
-3. Run the benchmark to see tokens/second for each backend
+3. Run the benchmark to see tokens/second
 
 ## Supported Models
 
