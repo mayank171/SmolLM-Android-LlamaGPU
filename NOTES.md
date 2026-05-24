@@ -464,6 +464,57 @@ val contextMultiplier = when {
 
 ---
 
+## 6. Model Quantization Guide
+
+**Key insight:** On Android, usable RAM is always less than advertised due to OS and app overhead.
+
+### Device RAM vs Practical Headroom
+
+| Device RAM | Practical Headroom | Recommended Quant | Max Model Size |
+|------------|-------------------|-------------------|----------------|
+| 4 GB | ~2.5 GB | Q4_K_M | 1.5B params |
+| 6 GB | ~4 GB | Q4_K_M | 3B params |
+| 8 GB | ~5.5 GB | Q4_K_M | 3-7B params |
+| 12 GB | ~9 GB | Q4_K_M or Q5_K_M | 7B params |
+| 16 GB+ | ~13 GB | Q5_K_M or Q6_K | 7B-13B params |
+
+### Quantization Types Comparison
+
+| Quant | Bits/Weight | Quality | Speed | Use Case |
+|-------|-------------|---------|-------|----------|
+| Q4_0 | 4.5 | Good | Fastest | Low-end devices |
+| Q4_K_M | 4.8 | Better | Fast | **Recommended for mobile** |
+| Q5_K_M | 5.5 | Very Good | Medium | High-end devices |
+| Q6_K | 6.6 | Excellent | Slower | Flagship devices |
+| Q8_0 | 8.5 | Near-FP16 | Slow | Desktop/Server |
+
+### Memory Breakdown Example (SmolLM-360M on 8GB device)
+
+```
+Total RAM:           8 GB
+├── OS Reserved:     ~2 GB
+├── Other Apps:      ~0.5 GB
+├── Available:       ~5.5 GB
+│
+├── Model Weights:   ~200 MB (Q4_0)
+├── KV Cache:        ~500 MB (Q8_0, 8K context)
+├── Inference Buf:   ~200 MB
+├── App Overhead:    ~100 MB
+│
+└── Free Headroom:   ~4.5 GB ✓
+```
+
+### Recommendations for This App
+
+| Model | Size | Min RAM | Recommended RAM |
+|-------|------|---------|-----------------|
+| SmolLM-360M (Q4) | ~200 MB | 3 GB | 4 GB |
+| Qwen2.5-0.5B (Q4) | ~400 MB | 4 GB | 6 GB |
+| Qwen2.5-1.5B (Q4) | ~900 MB | 6 GB | 8 GB |
+| Gemma-2B (Q4) | ~1.5 GB | 8 GB | 12 GB |
+
+---
+
 ## Future Improvements
 
 - [ ] Speculative decoding for faster generation

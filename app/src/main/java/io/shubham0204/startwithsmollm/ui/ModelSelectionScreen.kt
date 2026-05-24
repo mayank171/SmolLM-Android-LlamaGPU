@@ -401,3 +401,4 @@ private fun CompatibilityBadge(compatibility: ModelCompatibility) {
         )
     }
 }
+

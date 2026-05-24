@@ -14,6 +14,9 @@ import io.shubham0204.startwithsmollm.data.DownloadState
 import io.shubham0204.startwithsmollm.data.ModelDownloadManager
 import io.shubham0204.startwithsmollm.data.ModelInfo
 import io.shubham0204.startwithsmollm.ui.ModelSelectionUiState
+import io.shubham0204.startwithsmollm.rag.Document
+import io.shubham0204.startwithsmollm.rag.RagEngine
+import android.net.Uri
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.Dispatchers
@@ -31,7 +34,8 @@ enum class UserRole {
 
 data class ChatMessage(
     val content: String,
-    val userRole: UserRole
+    val userRole: UserRole,
+    val citations: List<io.shubham0204.startwithsmollm.rag.Citation> = emptyList()
 )
 
 enum class ModelLoadingState {
@@ -51,7 +55,8 @@ enum class ModelInferenceState {
 enum class AppScreen {
     MODEL_SELECTION,
     CHAT,
-    BENCHMARK
+    BENCHMARK,
+    RAG
 }
 
 data class ChatUIState(
@@ -60,13 +65,22 @@ data class ChatUIState(
     val modelInferenceState: ModelInferenceState = ModelInferenceState.IDLE,
     val currentModelName: String = "",
     val contextUsagePercent: Int = 0,
-    val toastMessage: String? = null
+    val toastMessage: String? = null,
+    val ragEnabled: Boolean = false
+)
+
+data class RagUiState(
+    val documents: List<Document> = emptyList(),
+    val stats: RagEngine.RagStats = RagEngine.RagStats(0, 0, 0),
+    val isProcessing: Boolean = false,
+    val errorMessage: String? = null
 )
 
 data class AppState(
     val currentScreen: AppScreen = AppScreen.MODEL_SELECTION,
     val modelSelectionState: ModelSelectionUiState = ModelSelectionUiState(),
-    val chatState: ChatUIState = ChatUIState()
+    val chatState: ChatUIState = ChatUIState(),
+    val ragState: RagUiState = RagUiState()
 )
 
 sealed interface AppEvent {
@@ -79,6 +93,13 @@ sealed interface AppEvent {
     data object ClearToast : AppEvent
     data object OpenBenchmark : AppEvent
     data object BackFromBenchmark : AppEvent
+    // RAG events
+    data object OpenRag : AppEvent
+    data object BackFromRag : AppEvent
+    data class AddDocument(val uri: Uri) : AppEvent
+    data class DeleteDocument(val documentId: String) : AppEvent
+    data object DeleteAllDocuments : AppEvent
+    data class SetRagEnabled(val enabled: Boolean) : AppEvent
 }
 
 class MainActivityViewModel(application: Application) : AndroidViewModel(application) {
@@ -90,6 +111,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     val appStateFlow: StateFlow<AppState> = _appStateFlow
 
     private val llamaGPU = LlamaGPU()
+    private val ragEngine = RagEngine(application)
     private var currentModelPath: String = ""
     private var currentModel: ModelInfo? = null
     private var downloadJob: Job? = null
@@ -99,6 +121,27 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     init {
         refreshDownloadedModels()
         logDeviceInfo()
+        initializeRag()
+    }
+    
+    private fun initializeRag() {
+        viewModelScope.launch(Dispatchers.IO) {
+            ragEngine.initialize()
+            refreshRagState()
+        }
+    }
+    
+    private fun refreshRagState() {
+        val documents = ragEngine.getDocuments()
+        val stats = ragEngine.getStats()
+        _appStateFlow.update { state ->
+            state.copy(
+                ragState = state.ragState.copy(
+                    documents = documents,
+                    stats = stats
+                )
+            )
+        }
     }
     
     private fun logDeviceInfo() {
@@ -118,6 +161,13 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             is AppEvent.ClearToast -> clearToast()
             is AppEvent.OpenBenchmark -> openBenchmark()
             is AppEvent.BackFromBenchmark -> backFromBenchmark()
+            // RAG events
+            is AppEvent.OpenRag -> openRag()
+            is AppEvent.BackFromRag -> backFromRag()
+            is AppEvent.AddDocument -> addDocument(event.uri)
+            is AppEvent.DeleteDocument -> deleteDocument(event.documentId)
+            is AppEvent.DeleteAllDocuments -> deleteAllDocuments()
+            is AppEvent.SetRagEnabled -> setRagEnabled(event.enabled)
         }
     }
     
@@ -291,11 +341,112 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         }
     }
     
+    // RAG Functions
+    private fun openRag() {
+        refreshRagState()
+        _appStateFlow.update { state ->
+            state.copy(currentScreen = AppScreen.RAG)
+        }
+    }
+    
+    private fun backFromRag() {
+        _appStateFlow.update { state ->
+            state.copy(currentScreen = AppScreen.CHAT)
+        }
+    }
+    
+    private fun addDocument(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _appStateFlow.update { state ->
+                state.copy(ragState = state.ragState.copy(isProcessing = true))
+            }
+            
+            when (val result = ragEngine.addDocument(uri)) {
+                is RagEngine.AddDocumentResult.Success -> {
+                    refreshRagState()
+                    withContext(Dispatchers.Main) {
+                        _appStateFlow.update { state ->
+                            state.copy(
+                                ragState = state.ragState.copy(isProcessing = false),
+                                chatState = state.chatState.copy(
+                                    toastMessage = "Added: ${result.document.name}"
+                                )
+                            )
+                        }
+                    }
+                }
+                is RagEngine.AddDocumentResult.Error -> {
+                    withContext(Dispatchers.Main) {
+                        _appStateFlow.update { state ->
+                            state.copy(
+                                ragState = state.ragState.copy(
+                                    isProcessing = false,
+                                    errorMessage = result.message
+                                ),
+                                chatState = state.chatState.copy(
+                                    toastMessage = "Error: ${result.message}"
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private fun deleteDocument(documentId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            ragEngine.deleteDocument(documentId)
+            refreshRagState()
+            
+            // Disable RAG if no documents left
+            if (!ragEngine.hasDocuments()) {
+                withContext(Dispatchers.Main) {
+                    _appStateFlow.update { state ->
+                        state.copy(
+                            chatState = state.chatState.copy(ragEnabled = false)
+                        )
+                    }
+                }
+            }
+        }
+    }
+    
+    private fun deleteAllDocuments() {
+        viewModelScope.launch(Dispatchers.IO) {
+            ragEngine.deleteAllDocuments()
+            refreshRagState()
+            
+            withContext(Dispatchers.Main) {
+                _appStateFlow.update { state ->
+                    state.copy(
+                        chatState = state.chatState.copy(
+                            ragEnabled = false,
+                            toastMessage = "All documents deleted"
+                        )
+                    )
+                }
+            }
+        }
+    }
+    
+    private fun setRagEnabled(enabled: Boolean) {
+        _appStateFlow.update { state ->
+            state.copy(
+                chatState = state.chatState.copy(ragEnabled = enabled)
+            )
+        }
+    }
+    
     fun getCurrentModelPath(): String? {
         return if (currentModelPath.isNotEmpty()) currentModelPath else null
     }
 
     private fun submitQuery(query: String) {
+        processQuery(query)
+    }
+    
+    private fun processQuery(query: String) {
         // For single-turn models (like Gemma), reset context each query
         if (currentModel?.supportsMultiTurn == false) {
             estimatedTokenCount = estimateTokens(query)
@@ -329,8 +480,21 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     showContextTrimmedMessage()
                 }
                 
+                // Check if RAG is enabled and use augmented prompt
+                val ragEnabled = _appStateFlow.value.chatState.ragEnabled
+                var citations: List<io.shubham0204.startwithsmollm.rag.Citation> = emptyList()
+                
+                val finalQuery = if (ragEnabled && ragEngine.hasDocuments()) {
+                    val ragResult = ragEngine.query(query)
+                    android.util.Log.d("SmolLM", "RAG: Found ${ragResult.retrievedChunks.size} relevant chunks")
+                    citations = ragResult.citations
+                    ragResult.augmentedPrompt
+                } else {
+                    query
+                }
+                
                 // getResponse handles adding user message internally
-                val llmResponse = llamaGPU.getResponse(query)
+                val llmResponse = llamaGPU.getResponse(finalQuery)
                 
                 // Add tokens for assistant response
                 estimatedTokenCount += estimateTokens(llmResponse)
@@ -340,7 +504,11 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                         state.copy(
                             chatState = state.chatState.copy(
                                 messages = state.chatState.messages.addChatMessage(
-                                    ChatMessage(content = llmResponse, userRole = UserRole.LLM)
+                                    ChatMessage(
+                                        content = llmResponse, 
+                                        userRole = UserRole.LLM,
+                                        citations = citations
+                                    )
                                 ),
                                 modelInferenceState = ModelInferenceState.SUCCESS,
                                 contextUsagePercent = calculateContextUsage()

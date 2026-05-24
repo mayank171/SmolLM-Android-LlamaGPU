@@ -58,6 +58,7 @@ android {
 
     androidResources {
         noCompress += "gguf"
+        noCompress += "onnx"  // For embedding model
     }
 }
 
@@ -72,6 +73,15 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.compose.material3.icons.extended)
     implementation("org.jetbrains.kotlinx:kotlinx-collections-immutable:0.4.0")
+
+    // PDF parsing
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    
+    // ONNX Runtime for neural embeddings
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.16.3")
+    
+    // ML Kit for OCR (text recognition from images)
+    implementation("com.google.mlkit:text-recognition:16.0.0")
 
     // TODO: Step 1
     implementation(files("libs/smollm-debug.aar"))
