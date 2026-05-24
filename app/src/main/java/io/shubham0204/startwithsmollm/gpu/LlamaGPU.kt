@@ -240,6 +240,15 @@ class LlamaGPU {
         }
     }
     
+    
+    /**
+     * Clear chat history and KV cache
+     */
+    fun clearChat() {
+        verifyHandle()
+        clearChat(nativePtr)
+    }
+    
     fun close() {
         if (nativePtr != 0L) {
             close(nativePtr)
@@ -281,4 +290,7 @@ class LlamaGPU {
     private external fun startCompletion(modelPtr: Long, prompt: String)
     private external fun completionLoop(modelPtr: Long): String
     private external fun stopCompletion(modelPtr: Long)
+    private external fun saveState(modelPtr: Long, path: String): Boolean
+    private external fun loadState(modelPtr: Long, path: String): Boolean
+    private external fun clearChat(modelPtr: Long)
 }

@@ -64,6 +64,11 @@ public:
     std::string completionLoop();
     void stopCompletion();
     
+    // State management for model swapping
+    bool saveState(const char* path);
+    bool loadState(const char* path);
+    void clearChat();
+    
     // GPU-specific methods
     bool isUsingGPU() const { return _useGPU; }
     static bool isVulkanAvailable();

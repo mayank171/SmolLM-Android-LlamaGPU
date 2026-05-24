@@ -13,6 +13,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -29,13 +30,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Source
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.foundation.clickable
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Badge
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -59,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import io.shubham0204.startwithsmollm.ui.BenchmarkScreen
 import io.shubham0204.startwithsmollm.ui.MarkdownText
 import io.shubham0204.startwithsmollm.ui.ModelSelectionScreen
+import io.shubham0204.startwithsmollm.ui.RagScreen
 import io.shubham0204.startwithsmollm.ui.theme.SmolLMStarterTemplateTheme
 import kotlinx.collections.immutable.ImmutableList
 
@@ -113,8 +121,10 @@ class MainActivity : ComponentActivity() {
                             BackHandler {
                                 viewModel.onEvent(AppEvent.BackToModelSelection)
                             }
+                            
                             ChatScreen(
                                 uiState = appState.chatState,
+                                ragDocumentCount = appState.ragState.documents.size,
                                 onBackClick = {
                                     viewModel.onEvent(AppEvent.BackToModelSelection)
                                 },
@@ -126,6 +136,9 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onBenchmarkClick = {
                                     viewModel.onEvent(AppEvent.OpenBenchmark)
+                                },
+                                onRagClick = {
+                                    viewModel.onEvent(AppEvent.OpenRag)
                                 }
                             )
                         }
@@ -140,6 +153,32 @@ class MainActivity : ComponentActivity() {
                                 }
                             )
                         }
+                        AppScreen.RAG -> {
+                            BackHandler {
+                                viewModel.onEvent(AppEvent.BackFromRag)
+                            }
+                            RagScreen(
+                                documents = appState.ragState.documents,
+                                stats = appState.ragState.stats,
+                                isProcessing = appState.ragState.isProcessing,
+                                ragEnabled = appState.chatState.ragEnabled,
+                                onRagEnabledChange = { enabled ->
+                                    viewModel.onEvent(AppEvent.SetRagEnabled(enabled))
+                                },
+                                onAddDocument = { uri ->
+                                    viewModel.onEvent(AppEvent.AddDocument(uri))
+                                },
+                                onDeleteDocument = { docId ->
+                                    viewModel.onEvent(AppEvent.DeleteDocument(docId))
+                                },
+                                onDeleteAllDocuments = {
+                                    viewModel.onEvent(AppEvent.DeleteAllDocuments)
+                                },
+                                onBack = {
+                                    viewModel.onEvent(AppEvent.BackFromRag)
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -150,10 +189,12 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun ChatScreen(
         uiState: ChatUIState,
+        ragDocumentCount: Int = 0,
         onBackClick: () -> Unit,
         onQuerySubmit: (String) -> Unit,
         onClearChat: () -> Unit,
-        onBenchmarkClick: () -> Unit
+        onBenchmarkClick: () -> Unit,
+        onRagClick: () -> Unit = {}
     ) {
         Scaffold(
             topBar = {
@@ -180,13 +221,18 @@ class MainActivity : ComponentActivity() {
                                 Text(
                                     text = when (uiState.modelLoadingState) {
                                         ModelLoadingState.LOADING -> "Loading model..."
-                                        ModelLoadingState.SUCCESS -> "Context: ${uiState.contextUsagePercent}%"
+                                        ModelLoadingState.SUCCESS -> {
+                                            val ragStatus = if (uiState.ragEnabled) " • RAG" else ""
+                                            "Context: ${uiState.contextUsagePercent}%$ragStatus"
+                                        }
                                         ModelLoadingState.FAILURE -> "Failed to load"
                                         ModelLoadingState.NOT_LOADED -> "Initializing..."
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = if (uiState.contextUsagePercent >= 80) {
                                         MaterialTheme.colorScheme.error
+                                    } else if (uiState.ragEnabled) {
+                                        MaterialTheme.colorScheme.primary
                                     } else {
                                         MaterialTheme.colorScheme.onSurfaceVariant
                                     }
@@ -195,6 +241,26 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     actions = {
+                        // RAG button
+                        IconButton(onClick = onRagClick) {
+                            Box {
+                                Icon(
+                                    imageVector = Icons.Default.FolderOpen,
+                                    contentDescription = "Knowledge Base",
+                                    tint = if (uiState.ragEnabled) 
+                                        MaterialTheme.colorScheme.primary 
+                                    else 
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (ragDocumentCount > 0) {
+                                    Badge(
+                                        modifier = Modifier.align(Alignment.TopEnd)
+                                    ) {
+                                        Text("$ragDocumentCount")
+                                    }
+                                }
+                            }
+                        }
                         // Benchmark button
                         IconButton(onClick = onBenchmarkClick) {
                             Icon(
@@ -306,22 +372,128 @@ class MainActivity : ComponentActivity() {
                 }
             } else {
                 // AI response - full width with markdown support
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(
-                        topStart = 4.dp,
-                        topEnd = 16.dp,
-                        bottomStart = 16.dp,
-                        bottomEnd = 16.dp
-                    ),
-                    color = MaterialTheme.colorScheme.surfaceVariant
+                Column {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(
+                            topStart = 4.dp,
+                            topEnd = 16.dp,
+                            bottomStart = if (message.citations.isEmpty()) 16.dp else 4.dp,
+                            bottomEnd = if (message.citations.isEmpty()) 16.dp else 4.dp
+                        ),
+                        color = MaterialTheme.colorScheme.surfaceVariant
+                    ) {
+                        MarkdownText(
+                            text = message.content,
+                            modifier = Modifier.padding(12.dp),
+                            defaultColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    
+                    // Citations section
+                    if (message.citations.isNotEmpty()) {
+                        CitationsSection(citations = message.citations)
+                    }
+                }
+            }
+        }
+    }
+    
+    @Composable
+    private fun CitationsSection(citations: List<io.shubham0204.startwithsmollm.rag.Citation>) {
+        var expanded by remember { mutableStateOf(false) }
+        
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(
+                topStart = 4.dp,
+                topEnd = 4.dp,
+                bottomStart = 16.dp,
+                bottomEnd = 16.dp
+            ),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                // Header row - clickable to expand
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { expanded = !expanded },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    MarkdownText(
-                        text = message.content,
-                        modifier = Modifier.padding(12.dp),
-                        defaultColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Source,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Sources (${citations.size})",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Icon(
+                        imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (expanded) "Collapse" else "Expand",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                
+                // Expanded citations
+                if (expanded) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    citations.forEach { citation ->
+                        CitationItem(citation = citation)
+                        if (citation != citations.last()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    @Composable
+    private fun CitationItem(citation: io.shubham0204.startwithsmollm.rag.Citation) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
+        ) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "[${citation.index}] ${citation.documentName}",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "${(citation.score * 100).toInt()}% match",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = citation.chunkText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 3,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
             }
         }
     }

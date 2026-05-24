@@ -292,6 +292,115 @@ void LlamaVulkan::stopCompletion() {
     _response.clear();
 }
 
+bool LlamaVulkan::saveState(const char* path) {
+    if (!_ctx) {
+        LOGe("Cannot save state: context not initialized");
+        return false;
+    }
+    
+    LOGi("Saving state to: %s", path);
+    
+    // Get state size
+    size_t state_size = llama_state_get_size(_ctx);
+    LOGi("State size: %zu bytes (%.2f MB)", state_size, state_size / (1024.0 * 1024.0));
+    
+    // Allocate buffer
+    std::vector<uint8_t> state_data(state_size);
+    
+    // Save state to buffer
+    size_t saved_size = llama_state_get_data(_ctx, state_data.data(), state_size);
+    if (saved_size == 0) {
+        LOGe("Failed to get state data");
+        return false;
+    }
+    
+    // Write to file
+    FILE* file = fopen(path, "wb");
+    if (!file) {
+        LOGe("Failed to open file for writing: %s", path);
+        return false;
+    }
+    
+    size_t written = fwrite(state_data.data(), 1, saved_size, file);
+    fclose(file);
+    
+    if (written != saved_size) {
+        LOGe("Failed to write complete state: wrote %zu of %zu bytes", written, saved_size);
+        return false;
+    }
+    
+    LOGi("State saved successfully: %zu bytes", saved_size);
+    return true;
+}
+
+bool LlamaVulkan::loadState(const char* path) {
+    if (!_ctx) {
+        LOGe("Cannot load state: context not initialized");
+        return false;
+    }
+    
+    LOGi("Loading state from: %s", path);
+    
+    // Open file
+    FILE* file = fopen(path, "rb");
+    if (!file) {
+        LOGe("Failed to open state file: %s", path);
+        return false;
+    }
+    
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    size_t file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    LOGi("State file size: %zu bytes (%.2f MB)", file_size, file_size / (1024.0 * 1024.0));
+    
+    // Read file
+    std::vector<uint8_t> state_data(file_size);
+    size_t read_size = fread(state_data.data(), 1, file_size, file);
+    fclose(file);
+    
+    if (read_size != file_size) {
+        LOGe("Failed to read complete state: read %zu of %zu bytes", read_size, file_size);
+        return false;
+    }
+    
+    // Load state
+    size_t loaded = llama_state_set_data(_ctx, state_data.data(), file_size);
+    if (loaded == 0) {
+        LOGe("Failed to set state data");
+        return false;
+    }
+    
+    LOGi("State loaded successfully: %zu bytes", loaded);
+    return true;
+}
+
+void LlamaVulkan::clearChat() {
+    LOGi("Clearing chat history (%zu messages)", _messages.size());
+    
+    // Free message memory
+    for (llama_chat_message& message : _messages) {
+        free(const_cast<char*>(message.role));
+        free(const_cast<char*>(message.content));
+    }
+    _messages.clear();
+    _formattedMessages.clear();
+    _response.clear();
+    _cacheResponseTokens.clear();
+    
+    // Reset context (clear KV cache) - use new API
+    if (_ctx) {
+        llama_memory_t mem = llama_get_memory(_ctx);
+        if (mem) {
+            llama_memory_clear(mem, true);
+        }
+    }
+    
+    _nCtxUsed = 0;
+    LOGi("Chat cleared");
+}
+
 LlamaVulkan::~LlamaVulkan() {
     for (llama_chat_message& message : _messages) {
         free(const_cast<char*>(message.role));

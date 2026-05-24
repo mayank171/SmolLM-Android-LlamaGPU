@@ -12,12 +12,12 @@
  */
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_00024Companion_isVulkanAvailableNative(JNIEnv* env, jobject thiz) {
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_isVulkanAvailableNative(JNIEnv* env, jclass clazz) {
     return LlamaVulkan::isVulkanAvailable();
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_00024Companion_getGPUInfoNative(JNIEnv* env, jobject thiz) {
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_getGPUInfoNative(JNIEnv* env, jclass clazz) {
     std::string info = LlamaVulkan::getGPUInfo();
     return env->NewStringUTF(info.c_str());
 }
@@ -140,4 +140,38 @@ Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_stopCompletion(
     
     auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
     llamaVulkan->stopCompletion();
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_saveState(
+    JNIEnv* env, jobject thiz, jlong modelPtr, jstring path) {
+    
+    jboolean isCopy = true;
+    const char* pathCstr = env->GetStringUTFChars(path, &isCopy);
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    
+    bool success = llamaVulkan->saveState(pathCstr);
+    env->ReleaseStringUTFChars(path, pathCstr);
+    return success;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_loadState(
+    JNIEnv* env, jobject thiz, jlong modelPtr, jstring path) {
+    
+    jboolean isCopy = true;
+    const char* pathCstr = env->GetStringUTFChars(path, &isCopy);
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    
+    bool success = llamaVulkan->loadState(pathCstr);
+    env->ReleaseStringUTFChars(path, pathCstr);
+    return success;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_clearChat(
+    JNIEnv* env, jobject thiz, jlong modelPtr) {
+    
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    llamaVulkan->clearChat();
 }
