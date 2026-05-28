@@ -77,6 +77,9 @@ dependencies {
     // PDF parsing
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     
+    // Note: Tabula-Java is incompatible with PDFBox-Android
+    // Using custom text-based table detection instead
+    
     // ONNX Runtime for neural embeddings
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.16.3")
     
