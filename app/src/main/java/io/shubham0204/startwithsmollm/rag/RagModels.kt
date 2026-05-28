@@ -46,12 +46,22 @@ data class Chunk(
 }
 
 /**
+ * Type of search used to find the chunk
+ */
+enum class SearchType {
+    SEMANTIC,   // Embedding-based similarity
+    BM25,       // Keyword-based BM25
+    HYBRID      // Combined semantic + BM25
+}
+
+/**
  * Search result with similarity score
  */
 data class ChunkSearchResult(
     val chunk: Chunk,
-    val score: Float,           // Cosine similarity (0-1)
-    val documentName: String
+    val score: Float,           // Similarity score (0-1 normalized)
+    val documentName: String,
+    val searchType: SearchType = SearchType.SEMANTIC
 )
 
 /**

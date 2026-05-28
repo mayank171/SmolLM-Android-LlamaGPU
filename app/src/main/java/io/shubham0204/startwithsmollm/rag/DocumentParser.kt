@@ -24,6 +24,8 @@ class DocumentParser(private val context: Context) {
     }
     
     private val imageTextExtractor = ImageTextExtractor(context)
+    private val tableExtractor = TableExtractor()
+    private val imageExtractor = ImageExtractor(context)
     
     init {
         initializePdfBox()
@@ -198,6 +200,79 @@ class DocumentParser(private val context: Context) {
     }
     
     /**
+     * Parse PDF with enhanced extraction (tables and images)
+     */
+    suspend fun parsePdfEnhanced(uri: Uri, fileName: String): ParseResult {
+        return try {
+            Log.d(TAG, "📖 ENHANCED PDF PARSING START: $fileName")
+            
+            val inputStream = context.contentResolver.openInputStream(uri)
+                ?: return ParseResult.Error("Could not open PDF")
+            
+            val sizeBytes = inputStream.available().toLong()
+            Log.d(TAG, "   File size: ${sizeBytes / 1024} KB")
+            
+            // Load PDF document
+            val document = PDDocument.load(inputStream)
+            val pageCount = document.numberOfPages
+            Log.d(TAG, "   Page count: $pageCount")
+            
+            // Extract text
+            val stripper = PDFTextStripper().apply {
+                sortByPosition = true
+            }
+            val text = stripper.getText(document)
+            
+            // Extract tables
+            Log.d(TAG, "   Extracting tables...")
+            val tables = tableExtractor.detectSimpleTables(text, 1)
+            Log.d(TAG, "   Found ${tables.size} tables")
+            
+            // Extract images
+            Log.d(TAG, "   Extracting images...")
+            val extractedImages = imageExtractor.extractImages(document)
+            Log.d(TAG, "   Found ${extractedImages.size} images")
+            
+            // Process images with OCR
+            val processedImages = if (extractedImages.isNotEmpty()) {
+                Log.d(TAG, "   Running OCR on images...")
+                imageExtractor.processImagesWithOcr(extractedImages)
+            } else {
+                emptyList()
+            }
+            Log.d(TAG, "   Processed ${processedImages.size} images with OCR")
+            
+            document.close()
+            inputStream.close()
+            
+            // Check if PDF might be scanned
+            val avgCharsPerPage = if (pageCount > 0) text.length / pageCount else 0
+            if (text.isBlank() || avgCharsPerPage < MIN_CHARS_PER_PAGE) {
+                Log.d(TAG, "⚠️ PDF appears to be SCANNED")
+                return ParseResult.NeedsOcr(fileName, DocumentType.PDF)
+            }
+            
+            Log.d(TAG, "✅ ENHANCED PDF PARSING SUCCESS")
+            Log.d(TAG, "   Text: ${text.length} chars")
+            Log.d(TAG, "   Tables: ${tables.size}")
+            Log.d(TAG, "   Images: ${processedImages.size}")
+            
+            ParseResult.Success(
+                text = text.trim(),
+                fileName = fileName,
+                type = DocumentType.PDF,
+                sizeBytes = sizeBytes,
+                usedOcr = false,
+                tables = tables,
+                images = processedImages
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ ENHANCED PDF PARSING ERROR: ${e.message}", e)
+            ParseResult.Error("Error parsing PDF: ${e.message}")
+        }
+    }
+    
+    /**
      * Parse PDF with automatic OCR fallback for scanned documents
      */
     private suspend fun parsePdfWithOcrFallback(uri: Uri, fileName: String): ParseResult {
@@ -232,7 +307,7 @@ class DocumentParser(private val context: Context) {
         return normalResult
     }
     
-    private fun getFileName(uri: Uri): String {
+    fun getFileName(uri: Uri): String {
         var name = "unknown"
         context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
@@ -262,8 +337,37 @@ class DocumentParser(private val context: Context) {
             val fileName: String,
             val type: DocumentType,
             val sizeBytes: Long,
-            val usedOcr: Boolean = false
-        ) : ParseResult()
+            val usedOcr: Boolean = false,
+            val tables: List<TableExtractor.ExtractedTable> = emptyList(),
+            val images: List<ImageExtractor.ProcessedImage> = emptyList()
+        ) : ParseResult() {
+            /**
+             * Get combined text including tables and image descriptions
+             */
+            fun getCombinedText(): String {
+                val builder = StringBuilder(text)
+                
+                // Add tables
+                if (tables.isNotEmpty()) {
+                    builder.append("\n\n## Extracted Tables\n\n")
+                    for (table in tables) {
+                        builder.append(table.toChunkText())
+                        builder.append("\n")
+                    }
+                }
+                
+                // Add image text
+                if (images.isNotEmpty()) {
+                    builder.append("\n\n## Extracted Images/Diagrams\n\n")
+                    for (image in images) {
+                        builder.append(image.toChunkText())
+                        builder.append("\n")
+                    }
+                }
+                
+                return builder.toString()
+            }
+        }
         
         data class Error(val message: String) : ParseResult()
         

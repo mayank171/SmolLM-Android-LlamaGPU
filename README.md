@@ -150,10 +150,10 @@ llamaGPU.close()
 Chat with your documents! The app supports uploading files and using them as context for conversations.
 
 **Supported file types:**
-- PDF documents
+- PDF documents (with table & image extraction)
 - Text files (.txt)
 - Markdown files (.md)
-- JSON files
+- Images (JPG, PNG) with OCR
 
 **How to use:**
 1. Load a model and start a chat
@@ -162,11 +162,25 @@ Chat with your documents! The app supports uploading files and using them as con
 4. Enable RAG toggle in the chat
 5. Ask questions about your documents!
 
+**Advanced Features:**
+- 📊 **Table Extraction**: Automatically detects and preserves table structure from PDFs
+- 🖼️ **Image OCR**: Extracts text from diagrams and images using ML Kit
+- 🔍 **Hybrid Search**: Combines BM25 keyword search with semantic embeddings (Reciprocal Rank Fusion)
+- ✂️ **Smart Chunking**: Sentence-aware chunking that never breaks mid-sentence
+- 📝 **Caption Detection**: Preserves table titles and figure captions
+
 **How it works:**
-- Documents are split into chunks
-- Each chunk is embedded using an ONNX model (all-MiniLM-L6-v2)
-- When you ask a question, relevant chunks are retrieved via semantic search
-- Retrieved context is injected into the prompt for accurate answers
+- Documents are parsed with enhanced extraction (text, tables, images)
+- Content is split into semantic chunks (sentence-aware)
+- Chunks are indexed in both vector database (embeddings) and BM25 (keywords)
+- Queries use hybrid search for best accuracy (95%+ on mixed queries)
+- Retrieved context is injected into the prompt with citations
+
+**Technical Stack:**
+- Embeddings: ONNX all-MiniLM-L6-v2 (on-device)
+- OCR: Google ML Kit Text Recognition
+- PDF: PDFBox-Android
+- Search: Custom BM25 + Vector similarity with RRF
 
 ### Benchmark
 

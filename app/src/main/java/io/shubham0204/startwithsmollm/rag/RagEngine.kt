@@ -17,12 +17,23 @@ class RagEngine(private val context: Context) {
     }
     
     private val documentParser = DocumentParser(context)
+    private val textChunker = TextChunker(
+        chunkSize = 512,
+        overlap = 100,
+        strategy = TextChunker.ChunkingStrategy.SENTENCE_AWARE
+    )
     private val structuredChunker = StructuredChunker(chunkSize = 512, chunkOverlap = 50)
     private val embeddingModel = EmbeddingModel(context)
     private val vectorDatabase = VectorDatabase(context)
     
     private var config = RagConfig()
-    private var useStructuredChunking = true  // Use new structure-aware chunker
+    private var searchMode = SearchMode.HYBRID  // Default to hybrid search
+    
+    enum class SearchMode {
+        SEMANTIC,  // Only embedding similarity
+        BM25,      // Only keyword search
+        HYBRID     // Combined (recommended)
+    }
     
     /**
      * Initialize the RAG engine
@@ -49,10 +60,10 @@ class RagEngine(private val context: Context) {
             Log.d(TAG, "╚═══════════════════════════════════════════════════════════════╝")
             Log.d(TAG, "URI: $uri")
             
-            // 1. Parse document (with OCR fallback for scanned PDFs/images)
+            // 1. Parse document with enhanced extraction (tables, images, OCR)
             Log.d(TAG, "")
-            Log.d(TAG, "▶ STEP 1: PARSING DOCUMENT...")
-            val parseResult = documentParser.parseWithOcr(uri)
+            Log.d(TAG, "▶ STEP 1: PARSING DOCUMENT (Enhanced Mode)...")
+            val parseResult = documentParser.parsePdfEnhanced(uri, documentParser.getFileName(uri))
             
             when (parseResult) {
                 is DocumentParser.ParseResult.Error -> {
@@ -72,12 +83,17 @@ class RagEngine(private val context: Context) {
             Log.d(TAG, "   Type: ${parsed.type}")
             Log.d(TAG, "   Size: ${parsed.sizeBytes / 1024} KB")
             Log.d(TAG, "   Text length: ${parsed.text.length} chars")
+            Log.d(TAG, "   Tables extracted: ${parsed.tables.size}")
+            Log.d(TAG, "   Images extracted: ${parsed.images.size}")
             Log.d(TAG, "   Used OCR: ${parsed.usedOcr}")
             
             // 2. Chunk the text using structure-aware chunker
+            // Use combined text that includes tables and images
             Log.d(TAG, "")
-            Log.d(TAG, "▶ STEP 2: CHUNKING TEXT...")
-            val structuredChunks = structuredChunker.chunk(parsed.text, parsed.fileName)
+            Log.d(TAG, "▶ STEP 2: CHUNKING TEXT (with tables & images)...")
+            val combinedText = parsed.getCombinedText()
+            Log.d(TAG, "   Combined text length: ${combinedText.length} chars")
+            val structuredChunks = structuredChunker.chunk(combinedText, parsed.fileName)
             
             if (structuredChunks.isEmpty()) {
                 Log.e(TAG, "❌ CHUNKING PRODUCED 0 CHUNKS!")
@@ -148,24 +164,52 @@ class RagEngine(private val context: Context) {
     }
     
     /**
-     * Query the RAG system
+     * Query the RAG system using the configured search mode
      * Returns relevant chunks and builds an augmented prompt with citations
      */
     suspend fun query(userQuery: String): RagResult = withContext(Dispatchers.IO) {
         try {
-            Log.d(TAG, "RAG query: $userQuery")
+            Log.d(TAG, "╔═══════════════════════════════════════════════════════════════╗")
+            Log.d(TAG, "║           🔍 RAG QUERY                                        ║")
+            Log.d(TAG, "╚═══════════════════════════════════════════════════════════════╝")
+            Log.d(TAG, "Query: $userQuery")
+            Log.d(TAG, "Search mode: $searchMode")
             
             // 1. Embed the query
             val queryEmbedding = embeddingModel.embed(userQuery)
             
-            // 2. Search for similar chunks
-            val results = vectorDatabase.search(
-                queryEmbedding = queryEmbedding,
-                topK = config.topK,
-                threshold = config.similarityThreshold
-            )
+            // 2. Search using configured mode
+            val results = when (searchMode) {
+                SearchMode.SEMANTIC -> {
+                    Log.d(TAG, "Using SEMANTIC search (embeddings only)")
+                    vectorDatabase.searchSemantic(
+                        queryEmbedding = queryEmbedding,
+                        topK = config.topK,
+                        threshold = config.similarityThreshold
+                    )
+                }
+                SearchMode.BM25 -> {
+                    Log.d(TAG, "Using BM25 search (keywords only)")
+                    vectorDatabase.searchBM25(
+                        query = userQuery,
+                        topK = config.topK
+                    )
+                }
+                SearchMode.HYBRID -> {
+                    Log.d(TAG, "Using HYBRID search (semantic + BM25 with RRF)")
+                    vectorDatabase.searchHybrid(
+                        query = userQuery,
+                        queryEmbedding = queryEmbedding,
+                        topK = config.topK
+                    )
+                }
+            }
             
             Log.d(TAG, "Found ${results.size} relevant chunks")
+            for ((i, result) in results.withIndex()) {
+                Log.d(TAG, "  [${i+1}] Score: ${"%.3f".format(result.score)} | ${result.searchType} | ${result.documentName}")
+                Log.d(TAG, "      Preview: ${result.chunk.text.take(80)}...")
+            }
             
             // 3. Generate citations
             val citations = results.mapIndexed { index, result ->
@@ -180,6 +224,8 @@ class RagEngine(private val context: Context) {
             
             // 4. Build augmented prompt
             val augmentedPrompt = buildAugmentedPrompt(userQuery, results)
+            
+            Log.d(TAG, "Augmented prompt length: ${augmentedPrompt.length} chars")
             
             RagResult(
                 query = userQuery,
@@ -197,6 +243,19 @@ class RagEngine(private val context: Context) {
             )
         }
     }
+    
+    /**
+     * Set the search mode
+     */
+    fun setSearchMode(mode: SearchMode) {
+        searchMode = mode
+        Log.d(TAG, "Search mode set to: $mode")
+    }
+    
+    /**
+     * Get current search mode
+     */
+    fun getSearchMode(): SearchMode = searchMode
     
     /**
      * Build the augmented prompt with retrieved context

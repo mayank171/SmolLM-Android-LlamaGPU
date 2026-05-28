@@ -9,7 +9,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * SQLite-based vector database for storing and searching document chunks
+ * SQLite-based vector database with hybrid search capabilities
+ * Combines semantic search (embeddings) with BM25 keyword search
  */
 class VectorDatabase(context: Context) : SQLiteOpenHelper(
     context, DATABASE_NAME, null, DATABASE_VERSION
@@ -18,7 +19,7 @@ class VectorDatabase(context: Context) : SQLiteOpenHelper(
     companion object {
         private const val TAG = "VectorDatabase"
         private const val DATABASE_NAME = "rag_vectors.db"
-        private const val DATABASE_VERSION = 1
+        private const val DATABASE_VERSION = 2
         
         // Tables
         private const val TABLE_DOCUMENTS = "documents"
@@ -41,9 +42,15 @@ class VectorDatabase(context: Context) : SQLiteOpenHelper(
         private const val COL_CHUNK_START = "start_char"
         private const val COL_CHUNK_END = "end_char"
         private const val COL_CHUNK_EMBEDDING = "embedding"
+        
+        // Hybrid search weights
+        private const val SEMANTIC_WEIGHT = 0.6f
+        private const val BM25_WEIGHT = 0.4f
+        private const val RRF_K = 60  // Reciprocal Rank Fusion constant
     }
     
     private val embeddingModel = EmbeddingModel(context)
+    private val bm25Search = BM25Search()
     
     override fun onCreate(db: SQLiteDatabase) {
         // Create documents table
@@ -92,6 +99,7 @@ class VectorDatabase(context: Context) : SQLiteOpenHelper(
     
     /**
      * Add a document and its chunks to the database
+     * Also indexes chunks in BM25 for keyword search
      */
     fun addDocument(document: Document, chunks: List<Chunk>): Boolean {
         val db = writableDatabase
@@ -111,7 +119,7 @@ class VectorDatabase(context: Context) : SQLiteOpenHelper(
             }
             db.insert(TABLE_DOCUMENTS, null, docValues)
             
-            // Insert chunks
+            // Insert chunks and index in BM25
             for (chunk in chunks) {
                 val chunkValues = ContentValues().apply {
                     put(COL_CHUNK_ID, chunk.id)
@@ -123,10 +131,13 @@ class VectorDatabase(context: Context) : SQLiteOpenHelper(
                     put(COL_CHUNK_EMBEDDING, floatArrayToBytes(chunk.embedding))
                 }
                 db.insert(TABLE_CHUNKS, null, chunkValues)
+                
+                // Index in BM25 for keyword search
+                bm25Search.indexDocument(chunk.id, chunk.text)
             }
             
             db.setTransactionSuccessful()
-            Log.d(TAG, "Added document ${document.name} with ${chunks.size} chunks")
+            Log.d(TAG, "Added document ${document.name} with ${chunks.size} chunks (BM25 indexed)")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Error adding document: ${e.message}")
@@ -137,9 +148,9 @@ class VectorDatabase(context: Context) : SQLiteOpenHelper(
     }
     
     /**
-     * Search for similar chunks using cosine similarity
+     * Semantic search using cosine similarity
      */
-    fun search(queryEmbedding: FloatArray, topK: Int = 3, threshold: Float = 0.0f): List<ChunkSearchResult> {
+    fun searchSemantic(queryEmbedding: FloatArray, topK: Int = 10, threshold: Float = 0.0f): List<ChunkSearchResult> {
         val db = readableDatabase
         val results = mutableListOf<ChunkSearchResult>()
         
@@ -170,16 +181,119 @@ class VectorDatabase(context: Context) : SQLiteOpenHelper(
                     results.add(ChunkSearchResult(
                         chunk = chunk,
                         score = similarity,
-                        documentName = it.getString(it.getColumnIndexOrThrow("doc_name"))
+                        documentName = it.getString(it.getColumnIndexOrThrow("doc_name")),
+                        searchType = SearchType.SEMANTIC
                     ))
                 }
             }
         }
         
-        // Sort by similarity and return top K
+        return results.sortedByDescending { it.score }.take(topK)
+    }
+    
+    /**
+     * BM25 keyword search
+     */
+    fun searchBM25(query: String, topK: Int = 10): List<ChunkSearchResult> {
+        val bm25Results = bm25Search.search(query, topK)
+        if (bm25Results.isEmpty()) return emptyList()
+        
+        val db = readableDatabase
+        val results = mutableListOf<ChunkSearchResult>()
+        
+        // Normalize BM25 scores to 0-1 range
+        val maxScore = bm25Results.maxOfOrNull { it.score } ?: 1f
+        
+        for (bm25Result in bm25Results) {
+            val cursor = db.rawQuery("""
+                SELECT c.*, d.$COL_DOC_NAME as doc_name
+                FROM $TABLE_CHUNKS c
+                JOIN $TABLE_DOCUMENTS d ON c.$COL_CHUNK_DOC_ID = d.$COL_DOC_ID
+                WHERE c.$COL_CHUNK_ID = ?
+            """, arrayOf(bm25Result.documentId))
+            
+            cursor.use {
+                if (it.moveToFirst()) {
+                    val embeddingBytes = it.getBlob(it.getColumnIndexOrThrow(COL_CHUNK_EMBEDDING))
+                    val chunk = Chunk(
+                        id = it.getString(it.getColumnIndexOrThrow(COL_CHUNK_ID)),
+                        documentId = it.getString(it.getColumnIndexOrThrow(COL_CHUNK_DOC_ID)),
+                        text = it.getString(it.getColumnIndexOrThrow(COL_CHUNK_TEXT)),
+                        position = it.getInt(it.getColumnIndexOrThrow(COL_CHUNK_POSITION)),
+                        startChar = it.getInt(it.getColumnIndexOrThrow(COL_CHUNK_START)),
+                        endChar = it.getInt(it.getColumnIndexOrThrow(COL_CHUNK_END)),
+                        embedding = bytesToFloatArray(embeddingBytes)
+                    )
+                    
+                    results.add(ChunkSearchResult(
+                        chunk = chunk,
+                        score = bm25Result.score / maxScore,  // Normalize to 0-1
+                        documentName = it.getString(it.getColumnIndexOrThrow("doc_name")),
+                        searchType = SearchType.BM25
+                    ))
+                }
+            }
+        }
+        
         return results
-            .sortedByDescending { it.score }
+    }
+    
+    /**
+     * Hybrid search combining semantic and BM25 using Reciprocal Rank Fusion (RRF)
+     * 
+     * RRF Score = Σ (1 / (k + rank_i)) for each ranking
+     * This method is robust and doesn't require score normalization
+     */
+    fun searchHybrid(
+        query: String,
+        queryEmbedding: FloatArray,
+        topK: Int = 5,
+        semanticWeight: Float = SEMANTIC_WEIGHT,
+        bm25Weight: Float = BM25_WEIGHT
+    ): List<ChunkSearchResult> {
+        // Get results from both search methods
+        val semanticResults = searchSemantic(queryEmbedding, topK * 2)
+        val bm25Results = searchBM25(query, topK * 2)
+        
+        Log.d(TAG, "Hybrid search: ${semanticResults.size} semantic, ${bm25Results.size} BM25 results")
+        
+        // Calculate RRF scores
+        val rrfScores = mutableMapOf<String, Float>()
+        val chunkMap = mutableMapOf<String, ChunkSearchResult>()
+        
+        // Add semantic results with RRF
+        for ((rank, result) in semanticResults.withIndex()) {
+            val rrfScore = semanticWeight / (RRF_K + rank + 1)
+            rrfScores[result.chunk.id] = (rrfScores[result.chunk.id] ?: 0f) + rrfScore
+            chunkMap[result.chunk.id] = result
+        }
+        
+        // Add BM25 results with RRF
+        for ((rank, result) in bm25Results.withIndex()) {
+            val rrfScore = bm25Weight / (RRF_K + rank + 1)
+            rrfScores[result.chunk.id] = (rrfScores[result.chunk.id] ?: 0f) + rrfScore
+            if (result.chunk.id !in chunkMap) {
+                chunkMap[result.chunk.id] = result
+            }
+        }
+        
+        // Sort by RRF score and return top K
+        return rrfScores.entries
+            .sortedByDescending { it.value }
             .take(topK)
+            .mapNotNull { (chunkId, rrfScore) ->
+                chunkMap[chunkId]?.copy(
+                    score = rrfScore,
+                    searchType = SearchType.HYBRID
+                )
+            }
+    }
+    
+    /**
+     * Legacy search method for backward compatibility
+     */
+    fun search(queryEmbedding: FloatArray, topK: Int = 3, threshold: Float = 0.0f): List<ChunkSearchResult> {
+        return searchSemantic(queryEmbedding, topK, threshold)
     }
     
     /**
