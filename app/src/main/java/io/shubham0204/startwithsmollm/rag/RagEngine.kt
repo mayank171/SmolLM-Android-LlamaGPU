@@ -3,6 +3,7 @@ package io.shubham0204.startwithsmollm.rag
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import io.shubham0204.startwithsmollm.rag.profiling.Profiler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -16,6 +17,14 @@ class RagEngine(private val context: Context) {
         private const val TAG = "RagEngine"
     }
     
+    // Profiler instance (lazy initialized, null if not available)
+    private val profiler by lazy { 
+        if (Profiler.isInitialized()) {
+            Profiler.getInstance(context)
+        } else null
+    }
+    
+    // Core components
     private val documentParser = DocumentParser(context)
     private val textChunker = TextChunker(
         chunkSize = 512,
@@ -25,6 +34,27 @@ class RagEngine(private val context: Context) {
     private val structuredChunker = StructuredChunker(chunkSize = 512, chunkOverlap = 50)
     private val embeddingModel = EmbeddingModel(context)
     private val vectorDatabase = VectorDatabase(context)
+    
+    // Profiled wrappers (when profiler is available)
+    private val profiledDocumentParser by lazy {
+        profiler?.let { io.shubham0204.startwithsmollm.rag.profiling.ProfiledDocumentParser(context, it) }
+    }
+    private val profiledTextChunker by lazy {
+        profiler?.let {
+            io.shubham0204.startwithsmollm.rag.profiling.ProfiledTextChunker(
+                chunkSize = 512,
+                overlap = 100,
+                strategy = TextChunker.ChunkingStrategy.SENTENCE_AWARE,
+                profiler = it
+            )
+        }
+    }
+    private val profiledEmbeddingModel by lazy {
+        profiler?.let { io.shubham0204.startwithsmollm.rag.profiling.ProfiledEmbeddingModel(embeddingModel, it) }
+    }
+    private val profiledVectorDatabase by lazy {
+        profiler?.let { io.shubham0204.startwithsmollm.rag.profiling.ProfiledVectorDatabase(context, it) }
+    }
     
     private var config = RagConfig()
     private var searchMode = SearchMode.HYBRID  // Default to hybrid search
@@ -40,9 +70,10 @@ class RagEngine(private val context: Context) {
      */
     suspend fun initialize(): Boolean = withContext(Dispatchers.IO) {
         try {
-            embeddingModel.initialize()
+            // Use profiled version if available
+            val success = profiledEmbeddingModel?.initialize() ?: embeddingModel.initialize()
             Log.d(TAG, "RAG engine initialized")
-            true
+            success
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize RAG engine: ${e.message}")
             false
@@ -63,7 +94,10 @@ class RagEngine(private val context: Context) {
             // 1. Parse document with enhanced extraction (tables, images, OCR)
             Log.d(TAG, "")
             Log.d(TAG, "▶ STEP 1: PARSING DOCUMENT (Enhanced Mode)...")
-            val parseResult = documentParser.parsePdfEnhanced(uri, documentParser.getFileName(uri))
+            // Use profiled version if available
+            val parseResult = profiledDocumentParser?.let {
+                it.parse(uri)
+            } ?: documentParser.parsePdfEnhanced(uri, documentParser.getFileName(uri))
             
             when (parseResult) {
                 is DocumentParser.ParseResult.Error -> {
@@ -122,7 +156,9 @@ class RagEngine(private val context: Context) {
             
             val chunks = structuredChunks.mapIndexed { index, structuredChunk ->
                 val textForEmbedding = structuredChunk.getContextualText()
-                val embedding = embeddingModel.embed(textForEmbedding)
+                // Use profiled version if available
+                val embedding = profiledEmbeddingModel?.embed(textForEmbedding) 
+                    ?: embeddingModel.embed(textForEmbedding)
                 if (index == 0) {
                     Log.d(TAG, "   Embedding dimension: ${embedding.size}")
                 }
@@ -143,7 +179,9 @@ class RagEngine(private val context: Context) {
             // 5. Store in database
             Log.d(TAG, "")
             Log.d(TAG, "▶ STEP 4: STORING IN DATABASE...")
-            val success = vectorDatabase.addDocument(document, chunks)
+            // Use profiled version if available
+            val success = profiledVectorDatabase?.addDocument(document, chunks)
+                ?: vectorDatabase.addDocument(document, chunks)
             if (!success) {
                 Log.e(TAG, "❌ DATABASE STORAGE FAILED")
                 return@withContext AddDocumentResult.Error("Failed to store document in database")
@@ -176,13 +214,20 @@ class RagEngine(private val context: Context) {
             Log.d(TAG, "Search mode: $searchMode")
             
             // 1. Embed the query
-            val queryEmbedding = embeddingModel.embed(userQuery)
+            // Use profiled version if available
+            val queryEmbedding = profiledEmbeddingModel?.embed(userQuery)
+                ?: embeddingModel.embed(userQuery)
             
             // 2. Search using configured mode
             val results = when (searchMode) {
                 SearchMode.SEMANTIC -> {
                     Log.d(TAG, "Using SEMANTIC search (embeddings only)")
-                    vectorDatabase.searchSemantic(
+                    // Use profiled version if available
+                    profiledVectorDatabase?.searchSemantic(
+                        queryEmbedding = queryEmbedding,
+                        topK = config.topK,
+                        threshold = config.similarityThreshold
+                    ) ?: vectorDatabase.searchSemantic(
                         queryEmbedding = queryEmbedding,
                         topK = config.topK,
                         threshold = config.similarityThreshold
@@ -190,14 +235,23 @@ class RagEngine(private val context: Context) {
                 }
                 SearchMode.BM25 -> {
                     Log.d(TAG, "Using BM25 search (keywords only)")
-                    vectorDatabase.searchBM25(
+                    // Use profiled version if available
+                    profiledVectorDatabase?.searchBM25(
+                        query = userQuery,
+                        topK = config.topK
+                    ) ?: vectorDatabase.searchBM25(
                         query = userQuery,
                         topK = config.topK
                     )
                 }
                 SearchMode.HYBRID -> {
                     Log.d(TAG, "Using HYBRID search (semantic + BM25 with RRF)")
-                    vectorDatabase.searchHybrid(
+                    // Use profiled version if available
+                    profiledVectorDatabase?.searchHybrid(
+                        query = userQuery,
+                        queryEmbedding = queryEmbedding,
+                        topK = config.topK
+                    ) ?: vectorDatabase.searchHybrid(
                         query = userQuery,
                         queryEmbedding = queryEmbedding,
                         topK = config.topK

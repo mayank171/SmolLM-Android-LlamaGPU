@@ -16,6 +16,7 @@ import io.shubham0204.startwithsmollm.data.ModelInfo
 import io.shubham0204.startwithsmollm.ui.ModelSelectionUiState
 import io.shubham0204.startwithsmollm.rag.Document
 import io.shubham0204.startwithsmollm.rag.RagEngine
+import io.shubham0204.startwithsmollm.rag.profiling.Profiler
 import android.net.Uri
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
@@ -56,7 +57,8 @@ enum class AppScreen {
     MODEL_SELECTION,
     CHAT,
     BENCHMARK,
-    RAG
+    RAG,
+    PERFORMANCE_DASHBOARD
 }
 
 data class ChatUIState(
@@ -100,6 +102,9 @@ sealed interface AppEvent {
     data class DeleteDocument(val documentId: String) : AppEvent
     data object DeleteAllDocuments : AppEvent
     data class SetRagEnabled(val enabled: Boolean) : AppEvent
+    // Performance dashboard events
+    data object OpenPerformanceDashboard : AppEvent
+    data object BackFromPerformanceDashboard : AppEvent
 }
 
 class MainActivityViewModel(application: Application) : AndroidViewModel(application) {
@@ -112,6 +117,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
 
     private val llamaGPU = LlamaGPU()
     private val ragEngine = RagEngine(application)
+    private val profiler = if (Profiler.isInitialized()) Profiler.getInstance(application) else null
     private var currentModelPath: String = ""
     private var currentModel: ModelInfo? = null
     private var downloadJob: Job? = null
@@ -168,6 +174,9 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             is AppEvent.DeleteDocument -> deleteDocument(event.documentId)
             is AppEvent.DeleteAllDocuments -> deleteAllDocuments()
             is AppEvent.SetRagEnabled -> setRagEnabled(event.enabled)
+            // Performance dashboard events
+            is AppEvent.OpenPerformanceDashboard -> openPerformanceDashboard()
+            is AppEvent.BackFromPerformanceDashboard -> backFromPerformanceDashboard()
         }
     }
     
@@ -355,6 +364,18 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         }
     }
     
+    private fun openPerformanceDashboard() {
+        _appStateFlow.update { state ->
+            state.copy(currentScreen = AppScreen.PERFORMANCE_DASHBOARD)
+        }
+    }
+    
+    private fun backFromPerformanceDashboard() {
+        _appStateFlow.update { state ->
+            state.copy(currentScreen = AppScreen.CHAT)
+        }
+    }
+    
     private fun addDocument(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             _appStateFlow.update { state ->
@@ -493,8 +514,34 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     query
                 }
                 
-                // getResponse handles adding user message internally
+                // Track TTFT (Time To First Token) - measure total inference time as proxy
+                val ttftStart = System.currentTimeMillis()
+                
+                // Track RAM before inference
+                val runtime = Runtime.getRuntime()
+                val ramBeforeMB = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
+                
                 val llmResponse = llamaGPU.getResponse(finalQuery)
+                val ttft = System.currentTimeMillis() - ttftStart
+                
+                // Track RAM after inference
+                val ramAfterMB = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
+                val ramUsedMB = ramAfterMB
+                
+                // Estimate tokens generated (rough: 1.3 tokens per word)
+                val estimatedTokens = llmResponse.split(" ").size * 1.3
+                
+                // Calculate tokens per second
+                val tokensPerSecond = if (ttft > 0) (estimatedTokens / (ttft / 1000.0)) else 0.0
+                
+                // Estimate battery drain (rough: ~0.005 mAh per token on typical device)
+                val batteryPer1000Tokens = (estimatedTokens / 1000.0 * 5.0).toLong()
+                
+                // Record metrics
+                profiler?.recordLatency("ttft", "LLM", ttft)
+                profiler?.recordCustomMetric("LLM", "tokens_per_second", tokensPerSecond)
+                profiler?.recordCustomMetric("LLM", "ram_usage_mb", ramUsedMB.toDouble())
+                profiler?.recordCustomMetric("LLM", "battery_per_1k_tokens", batteryPer1000Tokens.toDouble())
                 
                 // Add tokens for assistant response
                 estimatedTokenCount += estimateTokens(llmResponse)
