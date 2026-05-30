@@ -24,7 +24,7 @@ object AvailableModels {
             fileName = "qwen2.5-0.5b-instruct-q4_k_m.gguf",
             parameters = "0.5B",
             quantization = "Q4_K_M",
-            maxContextSize = 4096
+            maxContextSize = 32768  // Qwen 2.5 supports 32K context
         ),
         ModelInfo(
             id = "qwen2.5-1.5b-q4_k_m",
@@ -34,7 +34,8 @@ object AvailableModels {
             downloadUrl = "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
             fileName = "qwen2.5-1.5b-instruct-q4_k_m.gguf",
             parameters = "1.5B",
-            quantization = "Q4_K_M"
+            quantization = "Q4_K_M",
+            maxContextSize = 32768  // Qwen 2.5 supports 32K context
         ),
         ModelInfo(
             id = "smollm-360m-q4_0",
@@ -44,7 +45,8 @@ object AvailableModels {
             downloadUrl = "https://huggingface.co/shubham0204/SmolLM-360M-Instruct-GGUF/resolve/main/SmolLM-360M-Instruct.Q4_0.gguf",
             fileName = "SmolLM-360M-Instruct.Q4_0.gguf",
             parameters = "360M",
-            quantization = "Q4_0"
+            quantization = "Q4_0",
+            maxContextSize = 2048  // SmolLM native context is 2K
         ),
         ModelInfo(
             id = "gemma-2-2b-q4_k_m",
@@ -55,7 +57,7 @@ object AvailableModels {
             fileName = "gemma-2-2b-it-Q4_K_M.gguf",
             parameters = "2B",
             quantization = "Q4_K_M",
-            maxContextSize = 2048,
+            maxContextSize = 8192,  // Gemma 2 supports 8K context
             supportsMultiTurn = false
         )
     )

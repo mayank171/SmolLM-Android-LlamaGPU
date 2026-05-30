@@ -69,9 +69,9 @@ data class ChunkSearchResult(
  * Optimized for 4K token context window
  */
 data class RagConfig(
-    val chunkSize: Int = 1024,          // Characters per chunk (~256 tokens)
-    val chunkOverlap: Int = 100,        // 10% overlap between chunks
-    val topK: Int = 5,                  // Number of chunks to retrieve (~1280 tokens)
+    val chunkSize: Int = 768,           // Characters per chunk (~192 tokens) - balanced for quality & speed
+    val chunkOverlap: Int = 75,         // 10% overlap between chunks
+    val topK: Int = 3,                  // Number of chunks to retrieve - better coverage
     val similarityThreshold: Float = 0.3f,  // Minimum similarity to include
     val embeddingDimension: Int = 384   // all-MiniLM-L6-v2 dimension
 )

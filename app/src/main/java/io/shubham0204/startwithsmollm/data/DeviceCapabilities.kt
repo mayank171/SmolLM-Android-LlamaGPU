@@ -70,9 +70,11 @@ object DeviceCapabilities {
         // Context size affects KV cache memory usage
         // With Q8_0 KV cache quantization, we can use ~2x the context
         // compared to F16 (default) for the same memory
+        // NOTE: 8K tested but TTFT grows too slow (2min at 61% context)
+        // Attention is O(n²) - larger context = exponentially slower TTFT
         return when {
-            ramGB >= 8 -> 8192   // 8GB+ (S24, Pixel 8) → 8K context
-            ramGB >= 6 -> 4096   // 6-8GB → 4K context
+            ramGB >= 8 -> 6144   // 8GB+ → 6K context (balanced)
+            ramGB >= 6 -> 4096   // 6-8GB → 4K context (optimal for speed)
             ramGB >= 4 -> 2048   // 4-6GB → 2K context
             ramGB >= 3 -> 1024   // 3-4GB → 1K context
             else -> 512          // <3GB → 512 context
@@ -101,11 +103,11 @@ object DeviceCapabilities {
         val baseContext = profile.maxContextSize
         
         // Larger models need more memory for weights, so reduce context
-        // But with Q8_0 KV cache, the reduction is less severe
+        // With Q8_0 KV cache, we have 50% memory savings, so less reduction needed
         val contextMultiplier = when {
-            model.sizeInMB >= 1500 -> 0.6f  // Gemma 2B - 60% context (was 50%)
-            model.sizeInMB >= 1000 -> 0.8f  // Qwen 1.5B - 80% context (was 75%)
-            else -> 1.0f                     // Smaller models - full context
+            model.sizeInMB >= 1500 -> 0.75f  // Gemma 2B - 75% context
+            model.sizeInMB >= 1000 -> 1.0f   // Qwen 1.5B - FULL context (Q8_0 is efficient!)
+            else -> 1.0f                      // Smaller models - full context
         }
         
         // Also respect model's own maxContextSize limit

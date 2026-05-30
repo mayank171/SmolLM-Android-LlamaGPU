@@ -2,6 +2,7 @@ package io.shubham0204.startwithsmollm
 
 import android.app.Application
 import android.util.Log
+import io.shubham0204.startwithsmollm.data.ExpertMode
 import io.shubham0204.startwithsmollm.rag.profiling.Profiler
 import io.shubham0204.startwithsmollm.rag.profiling.ProfilerPresets
 import io.shubham0204.startwithsmollm.rag.profiling.ProfilerTest
@@ -22,6 +23,9 @@ class SmolLMApplication : Application() {
         Log.d(TAG, "╔═══════════════════════════════════════════════════════════════╗")
         Log.d(TAG, "║           🚀 SmolLM Application Starting                      ║")
         Log.d(TAG, "╚═══════════════════════════════════════════════════════════════╝")
+        
+        // Initialize ExpertMode (hidden developer mode)
+        ExpertMode.init(this)
         
         // Initialize profiler
         initializeProfiler()
