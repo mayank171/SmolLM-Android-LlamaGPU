@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Source
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -139,6 +140,9 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onRagClick = {
                                     viewModel.onEvent(AppEvent.OpenRag)
+                                },
+                                onPerformanceClick = {
+                                    viewModel.onEvent(AppEvent.OpenPerformanceDashboard)
                                 }
                             )
                         }
@@ -179,6 +183,16 @@ class MainActivity : ComponentActivity() {
                                 }
                             )
                         }
+                        AppScreen.PERFORMANCE_DASHBOARD -> {
+                            BackHandler {
+                                viewModel.onEvent(AppEvent.BackFromPerformanceDashboard)
+                            }
+                            io.shubham0204.startwithsmollm.ui.MinimalPerformanceDashboard(
+                                onDismiss = {
+                                    viewModel.onEvent(AppEvent.BackFromPerformanceDashboard)
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -194,7 +208,8 @@ class MainActivity : ComponentActivity() {
         onQuerySubmit: (String) -> Unit,
         onClearChat: () -> Unit,
         onBenchmarkClick: () -> Unit,
-        onRagClick: () -> Unit = {}
+        onRagClick: () -> Unit = {},
+        onPerformanceClick: () -> Unit = {}
     ) {
         Scaffold(
             topBar = {
@@ -268,6 +283,16 @@ class MainActivity : ComponentActivity() {
                                 contentDescription = "Benchmark",
                                 tint = MaterialTheme.colorScheme.primary
                             )
+                        }
+                        // Performance Dashboard button (only in debug builds)
+                        if (BuildConfig.DEBUG) {
+                            IconButton(onClick = onPerformanceClick) {
+                                Icon(
+                                    imageVector = Icons.Default.Analytics,
+                                    contentDescription = "Performance Dashboard",
+                                    tint = MaterialTheme.colorScheme.secondary
+                                )
+                            }
                         }
                         if (uiState.messages.isNotEmpty()) {
                             IconButton(onClick = onClearChat) {

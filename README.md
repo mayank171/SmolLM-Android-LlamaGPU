@@ -13,6 +13,7 @@ An Android application for running Small Language Models (SLMs) locally on your 
 - 💬 **Chat Interface** - Clean Material 3 chat UI with markdown support
 - � **RAG Support** - Upload documents and chat with your data
 - � **Benchmark Screen** - Test inference performance
+- 📊 **Performance Dashboard** - Real-time profiling and metrics (DEBUG builds)
 - ⚡ **Optimized Inference** - Flash Attention, KV Cache quantization, device-adaptive context
 
 ## Architecture
@@ -189,6 +190,41 @@ Test inference performance:
 1. Load a model from the Model Selection screen
 2. Tap the ⚡ (speedometer) icon in the chat screen
 3. Run the benchmark to see tokens/second
+
+### Performance Dashboard (DEBUG builds only)
+
+Monitor real-time performance metrics for RAG and LLM operations:
+
+**How to access:**
+1. Build and run a DEBUG version of the app
+2. Tap the 📊 (Analytics) icon in the chat screen
+3. View live metrics as you use the app
+
+**Metrics tracked:**
+
+**RAG Performance:**
+- **Document Processing**: Time to parse and extract content (Target: < 2000ms)
+- **Embedding Generation**: Time to generate embeddings (Target: < 30ms)
+- **Search Performance**: Time to retrieve relevant chunks (Target: < 100ms)
+- **Total RAG Query Time**: End-to-end RAG latency (Target: < 150ms)
+
+**LLM Inference Performance:**
+- **Total Generation Time**: Complete response time (Target: < 5000ms)
+- **Tokens per Second**: Generation speed (Target: > 10 tok/s)
+- **RAM Usage**: Memory consumption (Target: < 200MB)
+- **Battery Drain**: Estimated consumption per 1000 tokens (Target: < 5mAh/1K)
+
+**Features:**
+- ✓ Real-time updates during app usage
+- ✓ Color-coded status indicators (Good/Acceptable/Slow)
+- ✓ Industry-standard benchmark targets
+- ✓ Zero overhead in RELEASE builds (dashboard hidden)
+
+**Technical Details:**
+- Profiling system uses Strategy and Observer patterns
+- Metrics aggregated via composition-based profiled wrappers
+- Performance targets based on UX research and industry benchmarks
+- See `PERFORMANCE_DASHBOARD_PR.md` for complete documentation
 
 ## Supported Models
 

@@ -100,3 +100,18 @@ data class Citation(
     fun toShortString(): String = "[$index] $documentName"
     fun toDetailedString(): String = "[$index] $documentName (relevance: ${(score * 100).toInt()}%)"
 }
+
+/**
+ * Profiling metrics for a RAG operation
+ */
+data class RagMetrics(
+    val operation: String,
+    val totalLatencyMs: Long,
+    val embeddingLatencyMs: Long = 0,
+    val searchLatencyMs: Long = 0,
+    val parsingLatencyMs: Long = 0,
+    val chunkingLatencyMs: Long = 0,
+    val memoryUsedBytes: Long = 0,
+    val chunksProcessed: Int = 0,
+    val timestamp: Long = System.currentTimeMillis()
+)
