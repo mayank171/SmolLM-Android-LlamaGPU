@@ -17,6 +17,10 @@ class RagEngine(private val context: Context) {
         private const val TAG = "RagEngine"
     }
     
+    // Configuration
+    private var config = RagConfig()
+    private var searchMode = SearchMode.HYBRID  // Default to hybrid search
+    
     // Profiler instance (lazy initialized, null if not available)
     private val profiler by lazy { 
         if (Profiler.isInitialized()) {
@@ -27,9 +31,9 @@ class RagEngine(private val context: Context) {
     // Core components
     private val documentParser = DocumentParser(context)
     private val textChunker = TextChunker(
-        chunkSize = 512,
-        overlap = 100,
-        strategy = TextChunker.ChunkingStrategy.SENTENCE_AWARE
+        chunkSize = config.chunkSize,
+        overlap = config.chunkOverlap,
+        strategy = TextChunker.ChunkingStrategy.SEMANTIC  // Groups related sentences by topic
     )
     private val structuredChunker = StructuredChunker(chunkSize = 512, chunkOverlap = 50)
     private val embeddingModel = EmbeddingModel(context)
@@ -42,9 +46,9 @@ class RagEngine(private val context: Context) {
     private val profiledTextChunker by lazy {
         profiler?.let {
             io.shubham0204.startwithsmollm.rag.profiling.ProfiledTextChunker(
-                chunkSize = 512,
-                overlap = 100,
-                strategy = TextChunker.ChunkingStrategy.SENTENCE_AWARE,
+                chunkSize = config.chunkSize,
+                overlap = config.chunkOverlap,
+                strategy = TextChunker.ChunkingStrategy.SEMANTIC,  // Groups related sentences by topic
                 profiler = it
             )
         }
@@ -55,9 +59,6 @@ class RagEngine(private val context: Context) {
     private val profiledVectorDatabase by lazy {
         profiler?.let { io.shubham0204.startwithsmollm.rag.profiling.ProfiledVectorDatabase(context, it) }
     }
-    
-    private var config = RagConfig()
-    private var searchMode = SearchMode.HYBRID  // Default to hybrid search
     
     enum class SearchMode {
         SEMANTIC,  // Only embedding similarity
@@ -327,6 +328,7 @@ class RagEngine(private val context: Context) {
         for ((index, result) in chunks.withIndex()) {
             contextBuilder.append("---\n")
             contextBuilder.append("[${index + 1}] Source: ${result.documentName}\n")
+            // SEMANTIC chunks are already focused and complete - use them as-is
             contextBuilder.append(result.chunk.text)
             contextBuilder.append("\n")
         }

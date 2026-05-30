@@ -19,6 +19,9 @@ import io.shubham0204.startwithsmollm.rag.profiling.Profiler
 import io.shubham0204.startwithsmollm.rag.profiling.PerformanceTargets
 import io.shubham0204.startwithsmollm.rag.profiling.MetricStatus
 
+// Extension function to format Double with specific decimal places
+private fun Double.format(decimals: Int): String = "%.${decimals}f".format(this)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MinimalPerformanceDashboard(
@@ -168,36 +171,37 @@ fun MinimalPerformanceDashboard(
                     )
                 }
                 
-                // Total Generation Time
+                // TTFT (Time To First Token)
                 item {
-                    val genTimeAvg = metricsAggregator.getAverageLatency("LLM.ttft")
+                    val ttftAvg = metricsAggregator.getAverageLatency("LLM.ttft")
                     MetricCard(
-                        title = "Total Generation Time",
-                        value = if (genTimeAvg > 0) "${genTimeAvg.toInt()}ms" else "—",
-                        target = "< 5000ms",
+                        title = "TTFT (Time To First Token)",
+                        value = if (ttftAvg > 0) {
+                            if (ttftAvg >= 1000) "${(ttftAvg / 1000.0).format(1)}s" else "${ttftAvg.toInt()}ms"
+                        } else "—",
+                        target = "< 3s (Good), < 15s (OK)",
                         status = PerformanceTargets.evaluateStatus(
-                            genTimeAvg,
-                            5000L,  // < 5s is good
-                            10000L  // < 10s is acceptable
+                            ttftAvg,
+                            PerformanceTargets.LLM.TTFT_GOOD_MS,
+                            PerformanceTargets.LLM.TTFT_ACCEPTABLE_MS
                         ),
-                        description = "Time to generate complete response"
+                        description = "Time until first token appears (mobile on-device)"
                     )
                 }
                 
-                // Tokens per Second
+                // ITL (Inter-Token Latency)
                 item {
-                    val tokensPerSecAvg = metricsAggregator.getAverageCustomMetric("LLM.tokens_per_second")
+                    val itlAvg = metricsAggregator.getAverageLatency("LLM.itl")
                     MetricCard(
-                        title = "Tokens per Second",
-                        value = if (tokensPerSecAvg > 0) "${tokensPerSecAvg.toInt()} tok/s" else "—",
-                        target = "> 10 tok/s",
-                        status = when {
-                            tokensPerSecAvg <= 0 -> MetricStatus.UNKNOWN
-                            tokensPerSecAvg >= 10 -> MetricStatus.GOOD
-                            tokensPerSecAvg >= 5 -> MetricStatus.ACCEPTABLE
-                            else -> MetricStatus.SLOW
-                        },
-                        description = "Token generation speed (higher is better)"
+                        title = "ITL (Inter-Token Latency)",
+                        value = if (itlAvg > 0) "${itlAvg.toInt()}ms" else "—",
+                        target = PerformanceTargets.getTargetDescription("itl"),
+                        status = PerformanceTargets.evaluateStatus(
+                            itlAvg,
+                            PerformanceTargets.LLM.ITL_GOOD_MS,
+                            PerformanceTargets.LLM.ITL_ACCEPTABLE_MS
+                        ),
+                        description = "Average time between tokens"
                     )
                 }
                 

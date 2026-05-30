@@ -14,9 +14,12 @@ import io.shubham0204.startwithsmollm.data.DownloadState
 import io.shubham0204.startwithsmollm.data.ModelDownloadManager
 import io.shubham0204.startwithsmollm.data.ModelInfo
 import io.shubham0204.startwithsmollm.ui.ModelSelectionUiState
+import io.shubham0204.startwithsmollm.ui.InferenceMetrics
+import io.shubham0204.startwithsmollm.data.ExpertMode
 import io.shubham0204.startwithsmollm.rag.Document
 import io.shubham0204.startwithsmollm.rag.RagEngine
 import io.shubham0204.startwithsmollm.rag.profiling.Profiler
+import io.shubham0204.startwithsmollm.voice.VoiceManager
 import android.net.Uri
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
@@ -27,6 +30,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+// Extension function for formatting doubles
+private fun Double.format(decimals: Int): String = "%.${decimals}f".format(this)
 
 enum class UserRole {
     HUMAN,
@@ -117,17 +123,39 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
 
     private val llamaGPU = LlamaGPU()
     private val ragEngine = RagEngine(application)
+    private val voiceManager = VoiceManager(application)
     private val profiler = if (Profiler.isInitialized()) Profiler.getInstance(application) else null
     private var currentModelPath: String = ""
     private var currentModel: ModelInfo? = null
     private var downloadJob: Job? = null
     private var estimatedTokenCount: Int = 0
     private var maxContextSize: Int = deviceProfile.maxContextSize
+    
+    // Expert mode - inference insights
+    val isExpertMode = ExpertMode.isExpertMode
+    private val _inferenceMetrics = MutableStateFlow(InferenceMetrics())
+    val inferenceMetrics: StateFlow<InferenceMetrics> = _inferenceMetrics
+    
+    // Track last inference timing
+    private var lastTtftMs: Long = 0
+    private var lastTotalTimeMs: Long = 0
+    private var lastInputTokens: Int = 0
+    private var lastOutputTokens: Int = 0
 
     init {
         refreshDownloadedModels()
         logDeviceInfo()
         initializeRag()
+        initializeVoice()
+    }
+    
+    private fun initializeVoice() {
+        viewModelScope.launch(Dispatchers.IO) {
+            // Initialize TTS immediately (lightweight)
+            // Whisper will be loaded on-demand when user first uses voice input
+            voiceManager.initialize(loadWhisper = false)
+            android.util.Log.d("SmolLM", "Voice TTS initialized")
+        }
     }
     
     private fun initializeRag() {
@@ -234,6 +262,119 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private fun estimateTokens(text: String): Int {
         // Fallback estimate when model not loaded
         return ((text.length / 2.5) + 30).toInt().coerceAtLeast(1)
+    }
+    
+    // ==================== Voice Functions ====================
+    
+    /** Get voice state flow for UI */
+    val voiceState = voiceManager.state
+    
+    /** Start voice input - loads Whisper if needed, then starts recording */
+    fun startVoiceInput() {
+        viewModelScope.launch {
+            // Load Whisper on first use
+            if (!voiceManager.state.value.isWhisperLoaded) {
+                android.util.Log.d("SmolLM", "Loading Whisper model for first voice input...")
+                val loaded = voiceManager.loadWhisperIfNeeded()
+                if (!loaded) {
+                    android.util.Log.e("SmolLM", "Failed to load Whisper model")
+                    return@launch
+                }
+            }
+            
+            voiceManager.startListening()
+        }
+    }
+    
+    /** Stop voice input and transcribe, then submit to LLM */
+    fun stopVoiceInputAndSubmit() {
+        viewModelScope.launch {
+            val transcription = voiceManager.stopListeningAndTranscribe()
+            if (transcription.isNotBlank()) {
+                android.util.Log.d("SmolLM", "Voice transcription: $transcription")
+                submitQuery(transcription)
+            }
+        }
+    }
+    
+    /** Cancel voice input without submitting */
+    fun cancelVoiceInput() {
+        voiceManager.cancelListening()
+    }
+    
+    /** Speak text using TTS */
+    fun speakText(text: String) {
+        voiceManager.speak(text)
+    }
+    
+    /** Stop TTS */
+    fun stopSpeaking() {
+        voiceManager.stopSpeaking()
+    }
+    
+    /** Toggle auto-speak for LLM responses */
+    fun toggleAutoSpeak() {
+        voiceManager.toggleAutoSpeak()
+    }
+    
+    /** Toggle voice features on/off */
+    fun toggleVoice() {
+        voiceManager.toggleVoice()
+    }
+    
+    // ==================== Expert Mode Functions ====================
+    
+    /** Handle tap on model name (7 taps to enable expert mode) */
+    fun onModelNameTap(): Boolean {
+        val activated = ExpertMode.onTriggerTap()
+        if (activated) {
+            addSystemMessage("🔓 Expert Mode enabled! Tap ⚡ to view Inference Insights.")
+        }
+        return activated
+    }
+    
+    /** Get remaining taps for expert mode activation */
+    fun getExpertModeTapsRemaining(): Int = ExpertMode.getRemainingTaps()
+    
+    /** Update inference metrics after each inference */
+    private fun updateInferenceMetrics(
+        inputTokens: Int,
+        outputTokens: Int,
+        ttftMs: Long,
+        totalTimeMs: Long,
+        tokensPerSecond: Float,
+        contextUsed: Int,
+        ramUsedMB: Int,
+        avgItlMs: Float
+    ) {
+        val contextPercent = ((contextUsed.toFloat() / maxContextSize) * 100).toInt()
+        
+        // Estimate KV cache size (rough approximation)
+        // KV cache ≈ 2 * num_layers * context_size * hidden_dim * 2 bytes (fp16)
+        // For Qwen 1.5B: ~28 layers, 1536 hidden dim
+        val kvCacheMB = (contextUsed * 28 * 1536 * 2 * 2 / 1024 / 1024).coerceAtLeast(1)
+        
+        _inferenceMetrics.value = InferenceMetrics(
+            modelName = currentModel?.name ?: "",
+            modelSize = currentModel?.parameters ?: "",
+            quantization = currentModel?.quantization ?: "Q4_K_M",
+            contextSize = maxContextSize,
+            threads = deviceProfile.optimalThreads,
+            flashAttention = true,
+            kvCacheType = "Q8_0",
+            inputTokens = inputTokens,
+            outputTokens = outputTokens,
+            ttftMs = ttftMs,
+            totalTimeMs = totalTimeMs,
+            tokensPerSecond = tokensPerSecond,
+            contextUsed = contextUsed,
+            contextPercent = contextPercent,
+            ramUsedMB = ramUsedMB,
+            kvCacheMB = kvCacheMB,
+            avgItlMs = avgItlMs,
+            prefillTimeMs = ttftMs,
+            decodeTimeMs = totalTimeMs - ttftMs
+        )
     }
 
     private fun refreshDownloadedModels() {
@@ -464,7 +605,34 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private fun submitQuery(query: String) {
+        // Check for expert mode secret phrases
+        val expertResult = ExpertMode.checkSecretPhrase(query)
+        if (expertResult != null) {
+            val message = when (expertResult) {
+                "enabled" -> "🔓 Expert Mode enabled! Inference Insights now available."
+                "disabled" -> "🔒 Expert Mode disabled. Inference Insights hidden."
+                else -> return
+            }
+            // Add system message instead of processing as query
+            addSystemMessage(message)
+            return
+        }
+        
         processQuery(query)
+    }
+    
+    private fun addSystemMessage(message: String) {
+        _appStateFlow.update { state ->
+            val newMessage = ChatMessage(
+                content = message,
+                userRole = UserRole.LLM
+            )
+            state.copy(
+                chatState = state.chatState.copy(
+                    messages = (state.chatState.messages + newMessage).toImmutableList()
+                )
+            )
+        }
     }
     
     private fun processQuery(query: String) {
@@ -514,49 +682,133 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     query
                 }
                 
-                // Track TTFT (Time To First Token) - measure total inference time as proxy
-                val ttftStart = System.currentTimeMillis()
+                // Track streaming metrics (initialize before LLM starts)
+                var ttft: Long? = null
+                var lastTokenTime: Long = 0
+                val itlTimes = mutableListOf<Long>()
+                var tokenCount = 0
+                val responseBuilder = StringBuilder()
                 
                 // Track RAM before inference
                 val runtime = Runtime.getRuntime()
                 val ramBeforeMB = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
                 
-                val llmResponse = llamaGPU.getResponse(finalQuery)
-                val ttft = System.currentTimeMillis() - ttftStart
-                
-                // Track RAM after inference
-                val ramAfterMB = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
-                val ramUsedMB = ramAfterMB
-                
-                // Estimate tokens generated (rough: 1.3 tokens per word)
-                val estimatedTokens = llmResponse.split(" ").size * 1.3
-                
-                // Calculate tokens per second
-                val tokensPerSecond = if (ttft > 0) (estimatedTokens / (ttft / 1000.0)) else 0.0
-                
-                // Estimate battery drain (rough: ~0.005 mAh per token on typical device)
-                val batteryPer1000Tokens = (estimatedTokens / 1000.0 * 5.0).toLong()
-                
-                // Record metrics
-                profiler?.recordLatency("ttft", "LLM", ttft)
-                profiler?.recordCustomMetric("LLM", "tokens_per_second", tokensPerSecond)
-                profiler?.recordCustomMetric("LLM", "ram_usage_mb", ramUsedMB.toDouble())
-                profiler?.recordCustomMetric("LLM", "battery_per_1k_tokens", batteryPer1000Tokens.toDouble())
-                
-                // Add tokens for assistant response
-                estimatedTokenCount += estimateTokens(llmResponse)
-                
-                withContext(Dispatchers.Main) {
+                // Create placeholder message for streaming
+                val streamingMessageId = withContext(Dispatchers.Main) {
                     _appStateFlow.update { state ->
                         state.copy(
                             chatState = state.chatState.copy(
                                 messages = state.chatState.messages.addChatMessage(
                                     ChatMessage(
-                                        content = llmResponse, 
+                                        content = "", 
                                         userRole = UserRole.LLM,
                                         citations = citations
                                     )
-                                ),
+                                )
+                            )
+                        )
+                    }
+                    _appStateFlow.value.chatState.messages.size - 1
+                }
+                
+                // Start timing right before LLM inference
+                val inferenceStart = System.currentTimeMillis()
+                lastTokenTime = inferenceStart
+                
+                // Stream tokens one by one
+                llamaGPU.getResponseAsFlow(finalQuery).collect { token ->
+                    val now = System.currentTimeMillis()
+                    
+                    // Track TTFT (Time To First Token)
+                    if (ttft == null) {
+                        ttft = now - inferenceStart
+                        profiler?.recordLatency("ttft", "LLM", ttft!!)
+                    } else {
+                        // Track ITL (Inter-Token Latency)
+                        val itl = now - lastTokenTime
+                        itlTimes.add(itl)
+                        profiler?.recordLatency("itl", "LLM", itl)
+                    }
+                    
+                    lastTokenTime = now
+                    tokenCount++
+                    responseBuilder.append(token)
+                    
+                    // Update UI with streaming token
+                    withContext(Dispatchers.Main) {
+                        _appStateFlow.update { state ->
+                            val updatedMessages = state.chatState.messages.toMutableList()
+                            if (streamingMessageId < updatedMessages.size) {
+                                updatedMessages[streamingMessageId] = updatedMessages[streamingMessageId].copy(
+                                    content = responseBuilder.toString()
+                                )
+                            }
+                            state.copy(
+                                chatState = state.chatState.copy(
+                                    messages = updatedMessages.toImmutableList()
+                                )
+                            )
+                        }
+                    }
+                }
+                
+                val totalTime = System.currentTimeMillis() - inferenceStart
+                
+                // Track RAM after inference
+                val ramAfterMB = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
+                val ramUsedMB = ramAfterMB
+                
+                // Calculate average ITL
+                val avgItl = if (itlTimes.isNotEmpty()) itlTimes.average() else 0.0
+                
+                // Calculate tokens per second
+                val tokensPerSecond = if (totalTime > 0) (tokenCount / (totalTime / 1000.0)) else 0.0
+                
+                // Estimate battery drain
+                val batteryPer1000Tokens = (tokenCount / 1000.0 * 5.0).toLong()
+                
+                // 8K context testing logs
+                val contextUsed = getRealContextUsage()
+                android.util.Log.d("SmolLM-8K-TEST", "=== Inference Complete ===")
+                android.util.Log.d("SmolLM-8K-TEST", "Tokens generated: $tokenCount")
+                android.util.Log.d("SmolLM-8K-TEST", "Context used: $contextUsed / $maxContextSize (${(contextUsed.toFloat() / maxContextSize * 100).toInt()}%)")
+                android.util.Log.d("SmolLM-8K-TEST", "Speed: ${tokensPerSecond.format(1)} tok/s")
+                android.util.Log.d("SmolLM-8K-TEST", "RAM used: ${ramUsedMB}MB")
+                android.util.Log.d("SmolLM-8K-TEST", "TTFT: ${ttft}ms, Avg ITL: ${avgItl.format(0)}ms")
+                android.util.Log.d("SmolLM-8K-TEST", "Est. battery: ~${batteryPer1000Tokens}% per 1K tokens")
+                
+                // Record final metrics
+                profiler?.recordCustomMetric("LLM", "avg_itl", avgItl)
+                profiler?.recordCustomMetric("LLM", "tokens_per_second", tokensPerSecond)
+                profiler?.recordCustomMetric("LLM", "ram_usage_mb", ramUsedMB.toDouble())
+                profiler?.recordCustomMetric("LLM", "battery_per_1k_tokens", batteryPer1000Tokens.toDouble())
+                profiler?.recordCustomMetric("LLM", "total_tokens", tokenCount.toDouble())
+                
+                // Add tokens for assistant response
+                estimatedTokenCount += tokenCount
+                
+                // Update inference metrics for expert mode
+                updateInferenceMetrics(
+                    inputTokens = estimateTokens(query),
+                    outputTokens = tokenCount,
+                    ttftMs = ttft ?: 0L,
+                    totalTimeMs = totalTime,
+                    tokensPerSecond = tokensPerSecond.toFloat(),
+                    contextUsed = contextUsed,
+                    ramUsedMB = ramUsedMB.toInt(),
+                    avgItlMs = avgItl.toFloat()
+                )
+                
+                // Auto-speak response if enabled
+                val finalResponse = responseBuilder.toString()
+                if (voiceManager.state.value.autoSpeak && finalResponse.isNotBlank()) {
+                    voiceManager.speak(finalResponse)
+                }
+                
+                withContext(Dispatchers.Main) {
+                    _appStateFlow.update { state ->
+                        state.copy(
+                            chatState = state.chatState.copy(
                                 modelInferenceState = ModelInferenceState.SUCCESS,
                                 contextUsagePercent = calculateContextUsage()
                             )
@@ -712,7 +964,12 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 // Use device-optimized thread count
                 val optimalThreads = deviceProfile.optimalThreads
                 
+                // Track memory before loading
+                val runtime = Runtime.getRuntime()
+                val ramBeforeLoadMB = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
+                
                 android.util.Log.d("SmolLM", "Loading ${model.name}: threads=$optimalThreads, context=$safeContextSize, kvCache=Q8_0, flashAttn=true")
+                android.util.Log.d("SmolLM-8K-TEST", "RAM before load: ${ramBeforeLoadMB}MB")
                 
                 llamaGPU.load(
                     modelPath = currentModelPath,
@@ -734,6 +991,13 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 if (!model.id.contains("gemma")) {
                     llamaGPU.addSystemPrompt("You are a helpful and intelligent AI assistant. Answer questions clearly and concisely.")
                 }
+                
+                // Track memory after loading
+                val ramAfterLoadMB = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
+                val ramIncreaseMB = ramAfterLoadMB - ramBeforeLoadMB
+                android.util.Log.d("SmolLM-8K-TEST", "RAM after load: ${ramAfterLoadMB}MB (+${ramIncreaseMB}MB)")
+                android.util.Log.d("SmolLM-8K-TEST", "Context size: $safeContextSize tokens")
+                android.util.Log.d("SmolLM-8K-TEST", "Estimated KV cache: ~${(safeContextSize * 0.054).toInt()}MB (Q8_0)")
                 
                 withContext(Dispatchers.Main) {
                     _appStateFlow.update { state ->

@@ -32,18 +32,20 @@ object PerformanceTargets {
     }
     
     /**
-     * LLM Inference Targets
+     * LLM Inference Targets (Mobile On-Device)
      */
     object LLM {
-        // Time to first token (TTFT)
-        const val TTFT_GOOD_MS = 500L                      // < 500ms = Good
-        const val TTFT_ACCEPTABLE_MS = 1000L               // 500ms-1s = Acceptable
-        // Why: ChatGPT/Claude start responding within 300-500ms
+        // Time to first token (TTFT) - Mobile realistic targets
+        const val TTFT_GOOD_MS = 3000L                     // < 3s = Good
+        const val TTFT_ACCEPTABLE_MS = 15000L              // 3-15s = Acceptable
+        // Why: On-device 1-2B models need to process prompt + KV cache setup
+        //      With RAG context (~500-1000 tokens), 3-15s is realistic on mobile
         
-        // Inter-token latency (ITL)
-        const val ITL_GOOD_MS = 100L                       // < 100ms = Good (10 tokens/sec)
-        const val ITL_ACCEPTABLE_MS = 200L                 // 100-200ms = Acceptable (5 tokens/sec)
-        // Why: 10 tokens/sec = ~40 words/sec (faster than human reading speed)
+        // Inter-token latency (ITL) - Mobile realistic targets
+        const val ITL_GOOD_MS = 150L                       // < 150ms = Good (~7 tokens/sec)
+        const val ITL_ACCEPTABLE_MS = 300L                 // 150-300ms = Acceptable (~3-7 tokens/sec)
+        // Why: Mobile GPUs/NPUs achieve 3-10 tokens/sec for 1-2B models
+        //      7 tok/s = ~28 words/sec (still faster than reading speed)
         
         // Total generation time for typical response (100 tokens)
         const val GENERATION_GOOD_MS = 10000L              // < 10s = Good

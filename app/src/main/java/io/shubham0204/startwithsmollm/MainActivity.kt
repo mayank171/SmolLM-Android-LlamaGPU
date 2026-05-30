@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -33,9 +34,14 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Source
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material3.Card
@@ -65,11 +71,19 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.shubham0204.startwithsmollm.ui.BenchmarkScreen
+import io.shubham0204.startwithsmollm.ui.InferenceInsightsScreen
 import io.shubham0204.startwithsmollm.ui.MarkdownText
 import io.shubham0204.startwithsmollm.ui.ModelSelectionScreen
 import io.shubham0204.startwithsmollm.ui.RagScreen
 import io.shubham0204.startwithsmollm.ui.theme.SmolLMStarterTemplateTheme
+import io.shubham0204.startwithsmollm.voice.VoiceManager
+import io.shubham0204.startwithsmollm.data.ExpertMode
 import kotlinx.collections.immutable.ImmutableList
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 
 class MainActivity : ComponentActivity() {
 
@@ -123,9 +137,16 @@ class MainActivity : ComponentActivity() {
                                 viewModel.onEvent(AppEvent.BackToModelSelection)
                             }
                             
+                            val voiceState by viewModel.voiceState.collectAsState()
+                            val isExpertMode by viewModel.isExpertMode.collectAsState()
+                            val inferenceMetrics by viewModel.inferenceMetrics.collectAsState()
+                            
                             ChatScreen(
                                 uiState = appState.chatState,
                                 ragDocumentCount = appState.ragState.documents.size,
+                                voiceState = voiceState,
+                                isExpertMode = isExpertMode,
+                                inferenceMetrics = inferenceMetrics,
                                 onBackClick = {
                                     viewModel.onEvent(AppEvent.BackToModelSelection)
                                 },
@@ -141,8 +162,23 @@ class MainActivity : ComponentActivity() {
                                 onRagClick = {
                                     viewModel.onEvent(AppEvent.OpenRag)
                                 },
-                                onPerformanceClick = {
-                                    viewModel.onEvent(AppEvent.OpenPerformanceDashboard)
+                                onStartVoiceInput = {
+                                    viewModel.startVoiceInput()
+                                },
+                                onStopVoiceInput = {
+                                    viewModel.stopVoiceInputAndSubmit()
+                                },
+                                onCancelVoiceInput = {
+                                    viewModel.cancelVoiceInput()
+                                },
+                                onToggleAutoSpeak = {
+                                    viewModel.toggleAutoSpeak()
+                                },
+                                onStopSpeaking = {
+                                    viewModel.stopSpeaking()
+                                },
+                                onModelNameTap = {
+                                    viewModel.onModelNameTap()
                                 }
                             )
                         }
@@ -204,13 +240,32 @@ class MainActivity : ComponentActivity() {
     private fun ChatScreen(
         uiState: ChatUIState,
         ragDocumentCount: Int = 0,
+        voiceState: VoiceManager.VoiceState = VoiceManager.VoiceState(),
+        isExpertMode: Boolean = false,
+        inferenceMetrics: io.shubham0204.startwithsmollm.ui.InferenceMetrics = io.shubham0204.startwithsmollm.ui.InferenceMetrics(),
         onBackClick: () -> Unit,
         onQuerySubmit: (String) -> Unit,
         onClearChat: () -> Unit,
         onBenchmarkClick: () -> Unit,
         onRagClick: () -> Unit = {},
-        onPerformanceClick: () -> Unit = {}
+        onStartVoiceInput: () -> Unit = {},
+        onStopVoiceInput: () -> Unit = {},
+        onCancelVoiceInput: () -> Unit = {},
+        onToggleAutoSpeak: () -> Unit = {},
+        onStopSpeaking: () -> Unit = {},
+        onModelNameTap: () -> Unit = {}
     ) {
+        // State for showing inference insights dialog
+        var showInferenceInsights by remember { mutableStateOf(false) }
+        
+        // Show Inference Insights dialog when expert mode is enabled
+        if (showInferenceInsights && isExpertMode) {
+            InferenceInsightsScreen(
+                metrics = inferenceMetrics,
+                onDismiss = { showInferenceInsights = false }
+            )
+            return
+        }
         Scaffold(
             topBar = {
                 CenterAlignedTopAppBar(
@@ -223,7 +278,10 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     title = {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.clickable { onModelNameTap() }
+                        ) {
                             Text(
                                 text = uiState.currentModelName.ifEmpty { "AI Assistant" },
                                 style = MaterialTheme.typography.titleLarge,
@@ -256,7 +314,7 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     actions = {
-                        // RAG button
+                        // RAG button (always visible)
                         IconButton(onClick = onRagClick) {
                             Box {
                                 Icon(
@@ -276,7 +334,8 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
-                        // Benchmark button
+                        
+                        // Benchmark button (always visible)
                         IconButton(onClick = onBenchmarkClick) {
                             Icon(
                                 imageVector = Icons.Default.Speed,
@@ -284,16 +343,15 @@ class MainActivity : ComponentActivity() {
                                 tint = MaterialTheme.colorScheme.primary
                             )
                         }
-                        // Performance Dashboard button (only in debug builds)
-                        if (BuildConfig.DEBUG) {
-                            IconButton(onClick = onPerformanceClick) {
-                                Icon(
-                                    imageVector = Icons.Default.Analytics,
-                                    contentDescription = "Performance Dashboard",
-                                    tint = MaterialTheme.colorScheme.secondary
-                                )
+                        
+                        // Expert mode - single ⚡ button for Inference Insights + Performance
+                        if (isExpertMode) {
+                            IconButton(onClick = { showInferenceInsights = true }) {
+                                Text("⚡", style = MaterialTheme.typography.titleLarge)
                             }
                         }
+                        
+                        // Clear chat button
                         if (uiState.messages.isNotEmpty()) {
                             IconButton(onClick = onClearChat) {
                                 Icon(
@@ -323,7 +381,13 @@ class MainActivity : ComponentActivity() {
                 )
                 MessageInput(
                     modelLoadingState = uiState.modelLoadingState,
-                    onQuerySubmit = onQuerySubmit
+                    voiceState = voiceState,
+                    onQuerySubmit = onQuerySubmit,
+                    onStartVoiceInput = onStartVoiceInput,
+                    onStopVoiceInput = onStopVoiceInput,
+                    onCancelVoiceInput = onCancelVoiceInput,
+                    onToggleAutoSpeak = onToggleAutoSpeak,
+                    onStopSpeaking = onStopSpeaking
                 )
             }
         }
@@ -506,7 +570,7 @@ class MainActivity : ComponentActivity() {
                         color = MaterialTheme.colorScheme.primary
                     )
                     Text(
-                        text = "${(citation.score * 100).toInt()}% match",
+                        text = "${"%.1f".format(citation.score * 100)}% match",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -556,81 +620,231 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun MessageInput(
         modelLoadingState: ModelLoadingState,
-        onQuerySubmit: (String) -> Unit
+        voiceState: VoiceManager.VoiceState = VoiceManager.VoiceState(),
+        onQuerySubmit: (String) -> Unit,
+        onStartVoiceInput: () -> Unit = {},
+        onStopVoiceInput: () -> Unit = {},
+        onCancelVoiceInput: () -> Unit = {},
+        onToggleAutoSpeak: () -> Unit = {},
+        onStopSpeaking: () -> Unit = {}
     ) {
         var queryText by remember { mutableStateOf("") }
+        val context = LocalContext.current
+        
+        // Permission launcher for microphone
+        val permissionLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { isGranted ->
+            if (isGranted) {
+                onStartVoiceInput()
+            } else {
+                Toast.makeText(context, "Microphone permission required for voice input", Toast.LENGTH_SHORT).show()
+            }
+        }
         
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(
-                    value = queryText,
-                    onValueChange = { queryText = it },
-                    modifier = Modifier.weight(1f),
-                    enabled = modelLoadingState == ModelLoadingState.SUCCESS,
-                    placeholder = {
-                        Text(
-                            text = when (modelLoadingState) {
-                                ModelLoadingState.LOADING -> "Loading model..."
-                                ModelLoadingState.SUCCESS -> "Type a message..."
-                                ModelLoadingState.FAILURE -> "Model failed to load"
-                                ModelLoadingState.NOT_LOADED -> "Initializing..."
-                            }
-                        )
-                    },
-                    shape = RoundedCornerShape(24.dp),
-                    singleLine = false,
-                    maxLines = 4
-                )
-                
-                when (modelLoadingState) {
-                    ModelLoadingState.LOADING -> {
-                        CircularProgressIndicator(
-                            modifier = Modifier.padding(8.dp),
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    ModelLoadingState.SUCCESS -> {
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = if (queryText.isNotBlank()) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.surfaceVariant
-                            }
+            Column {
+                // Voice status indicator
+                if (voiceState.isListening || voiceState.isTranscribing || voiceState.isSpeaking) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.primaryContainer)
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            IconButton(
-                                onClick = {
-                                    if (queryText.isNotBlank()) {
-                                        onQuerySubmit(queryText)
-                                        queryText = ""
-                                    }
-                                },
-                                enabled = queryText.isNotBlank()
-                            ) {
+                            if (voiceState.isListening) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Text(
+                                    text = "🎤 Listening...",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            } else if (voiceState.isTranscribing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "Processing speech...",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            } else if (voiceState.isSpeaking) {
                                 Icon(
-                                    imageVector = Icons.Default.Send,
-                                    contentDescription = "Send",
-                                    tint = if (queryText.isNotBlank()) {
-                                        MaterialTheme.colorScheme.onPrimary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    }
+                                    imageVector = Icons.Default.VolumeUp,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "Speaking...",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
                                 )
                             }
                         }
+                        
+                        // Cancel/Stop button
+                        IconButton(
+                            onClick = {
+                                when {
+                                    voiceState.isListening -> onCancelVoiceInput()
+                                    voiceState.isSpeaking -> onStopSpeaking()
+                                }
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Stop,
+                                contentDescription = "Stop",
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
-                    else -> {
-                        // NOT_LOADED and FAILURE cases
+                }
+                
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Auto-speak toggle
+                    IconButton(
+                        onClick = onToggleAutoSpeak,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (voiceState.autoSpeak) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                            contentDescription = if (voiceState.autoSpeak) "Auto-speak on" else "Auto-speak off",
+                            tint = if (voiceState.autoSpeak) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+                    
+                    OutlinedTextField(
+                        value = queryText,
+                        onValueChange = { queryText = it },
+                        modifier = Modifier.weight(1f),
+                        enabled = modelLoadingState == ModelLoadingState.SUCCESS && !voiceState.isListening,
+                        placeholder = {
+                            Text(
+                                text = when {
+                                    voiceState.isListening -> "Listening..."
+                                    voiceState.isTranscribing -> "Processing..."
+                                    modelLoadingState == ModelLoadingState.LOADING -> "Loading model..."
+                                    modelLoadingState == ModelLoadingState.SUCCESS -> "Type or tap 🎤"
+                                    modelLoadingState == ModelLoadingState.FAILURE -> "Model failed to load"
+                                    else -> "Initializing..."
+                                }
+                            )
+                        },
+                        shape = RoundedCornerShape(24.dp),
+                        singleLine = false,
+                        maxLines = 4
+                    )
+                    
+                    when (modelLoadingState) {
+                        ModelLoadingState.LOADING -> {
+                            CircularProgressIndicator(
+                                modifier = Modifier.padding(8.dp),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        ModelLoadingState.SUCCESS -> {
+                            // Voice input button
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = if (voiceState.isListening) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                }
+                            ) {
+                                IconButton(
+                                    onClick = {
+                                        if (voiceState.isListening) {
+                                            // Stop recording and transcribe
+                                            onStopVoiceInput()
+                                        } else {
+                                            // Check permission and start recording
+                                            if (ContextCompat.checkSelfPermission(
+                                                    context,
+                                                    Manifest.permission.RECORD_AUDIO
+                                                ) == PackageManager.PERMISSION_GRANTED
+                                            ) {
+                                                onStartVoiceInput()
+                                            } else {
+                                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                            }
+                                        }
+                                    },
+                                    enabled = !voiceState.isTranscribing
+                                ) {
+                                    Icon(
+                                        imageVector = if (voiceState.isListening) Icons.Default.Stop else Icons.Default.Mic,
+                                        contentDescription = if (voiceState.isListening) "Stop recording" else "Voice input",
+                                        tint = if (voiceState.isListening) {
+                                            MaterialTheme.colorScheme.onError
+                                        } else {
+                                            MaterialTheme.colorScheme.onSecondaryContainer
+                                        }
+                                    )
+                                }
+                            }
+                            
+                            // Send button
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = if (queryText.isNotBlank()) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                }
+                            ) {
+                                IconButton(
+                                    onClick = {
+                                        if (queryText.isNotBlank()) {
+                                            onQuerySubmit(queryText)
+                                            queryText = ""
+                                        }
+                                    },
+                                    enabled = queryText.isNotBlank()
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Send,
+                                        contentDescription = "Send",
+                                        tint = if (queryText.isNotBlank()) {
+                                            MaterialTheme.colorScheme.onPrimary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        else -> {
+                            // NOT_LOADED and FAILURE cases
+                        }
                     }
                 }
             }

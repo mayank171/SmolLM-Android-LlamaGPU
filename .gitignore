@@ -19,8 +19,15 @@ local.properties
 # llama.cpp - clone separately if needed for rebuilding native libs
 llama.cpp/
 
+# whisper.cpp - clone separately if needed for rebuilding native libs
+whisper.cpp/
+
 # SmolChat clone (not needed in repo)
 SmolChat-Android/
 
 # Large model files
 *.gguf
+*.bin
+
+# Pre-built native libraries (download separately)
+app/src/main/jniLibs/

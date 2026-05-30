@@ -63,7 +63,7 @@ fun MarkdownText(
             modifier = modifier,
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Pre-process: convert LaTeX to Unicode
+            // Pre-process: convert LaTeX first, then parse blocks (preserves math in code)
             val processedText = convertLatexToUnicode(text)
             val blocks = parseMarkdownBlocks(processedText)
             
@@ -99,26 +99,27 @@ private fun CodeBlockView(
     language: String?
 ) {
     val context = LocalContext.current
+    val isMath = language?.lowercase() in listOf("math", "latex", "tex")
     
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xFF1E1E1E))
+            .background(if (isMath) Color(0xFFF8F4FF) else Color(0xFF1E1E1E))
     ) {
         // Header with language and copy button
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF2D2D2D))
+                .background(if (isMath) Color(0xFFEDE7F6) else Color(0xFF2D2D2D))
                 .padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = language?.uppercase() ?: "CODE",
+                text = if (isMath) "MATH" else (language?.uppercase() ?: "CODE"),
                 style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF9CDCFE),
+                color = if (isMath) Color(0xFF7C4DFF) else Color(0xFF9CDCFE),
                 fontFamily = FontFamily.Monospace
             )
             
@@ -140,16 +141,18 @@ private fun CodeBlockView(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
-                .padding(12.dp)
+                .padding(12.dp),
+            contentAlignment = if (isMath) Alignment.Center else Alignment.TopStart
         ) {
             Text(
-                text = code.trimEnd(),
+                text = if (isMath) convertLatexToUnicode(code.trimEnd()) else code.trimEnd(),
                 style = MaterialTheme.typography.bodySmall.copy(
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp
+                    fontFamily = if (isMath) FontFamily.Default else FontFamily.Monospace,
+                    fontSize = if (isMath) 18.sp else 12.sp,
+                    lineHeight = if (isMath) 28.sp else 18.sp,
+                    letterSpacing = if (isMath) 0.5.sp else 0.sp
                 ),
-                color = Color(0xFFD4D4D4)
+                color = if (isMath) Color(0xFF1A1A1A) else Color(0xFFD4D4D4)
             )
         }
     }
@@ -285,12 +288,26 @@ private fun FormattedText(
                     val endTick = content.indexOf('`', currentIndex + 1)
                     if (endTick != -1) {
                         val codeText = content.substring(currentIndex + 1, endTick)
+                        // Check if it contains math symbols
+                        val hasMathSymbols = codeText.any { char ->
+                            char in '⁰'..'⁹' || char in '₀'..'₉' || 
+                            char in setOf('α', 'β', 'γ', 'δ', 'π', 'σ', 'θ', 'λ', 'μ', 'ν', 'ξ', 'ρ', 'τ', 'φ', 'χ', 'ψ', 'ω',
+                                         'Α', 'Β', 'Γ', 'Δ', 'Θ', 'Λ', 'Ξ', 'Π', 'Σ', 'Φ', 'Ψ', 'Ω',
+                                         '∑', '∏', '∫', '∮', '√', '∛', '∞', '∂', '∇',
+                                         '≤', '≥', '≠', '≈', '≡', '∝', '±', '∓', '×', '÷', '·',
+                                         '∈', '∉', '⊂', '⊃', '∪', '∩', '∅',
+                                         '→', '←', '↔', '⇒', '⇐', '⇔',
+                                         '∀', '∃', '¬', '∧', '∨')
+                        }
+                        
                         withStyle(SpanStyle(
-                            fontFamily = FontFamily.Monospace,
-                            background = Color(0xFF2D2D2D),
-                            color = Color(0xFFCE9178)
+                            fontFamily = FontFamily.Default,  // Default font has best Unicode support
+                            background = if (hasMathSymbols) Color(0xFFF3E5F5) else Color(0xFF2D2D2D),
+                            color = if (hasMathSymbols) Color(0xFF6A1B9A) else Color(0xFFCE9178),
+                            fontSize = if (hasMathSymbols) 17.sp else 14.sp,
+                            letterSpacing = if (hasMathSymbols) 0.5.sp else 0.sp
                         )) {
-                            append(" $codeText ")
+                            append("  $codeText  ")  // Extra padding for readability
                         }
                         currentIndex = endTick + 1
                     } else {
@@ -598,6 +615,55 @@ private fun convertLatexToUnicode(text: String): String {
     
     // Clean up extra braces
     result = result.replace("{", "").replace("}", "")
+    
+    return result
+}
+
+/**
+ * Auto-detect math formulas and equations, wrap them in code blocks if not already formatted
+ * Detects patterns like: E = mc^2, x^2 + y^2 = r^2, f(x) = ..., etc.
+ */
+private fun autoWrapMathFormulas(text: String): String {
+    var result = text
+    
+    // Pattern 1: Equations with = sign and math symbols (e.g., "E = mc^2", "x^2 + y^2 = r^2")
+    // Only wrap if not already in code blocks or math delimiters
+    val equationPattern = Regex("""(?<!`|\$)([A-Za-z]\s*=\s*[^=\n]{3,50})(?!`|\$)""")
+    result = equationPattern.replace(result) { match ->
+        val equation = match.groupValues[1].trim()
+        // Check if it looks like a math equation (contains operators or superscripts)
+        if (equation.matches(Regex(""".*[+\-*/^²³⁴⁵⁶⁷⁸⁹⁰√∫∑∏].*"""))) {
+            "`$equation`"  // Wrap in inline code
+        } else {
+            match.value  // Leave as-is
+        }
+    }
+    
+    // Pattern 2: Functions like f(x) = ..., g(x, y) = ..., etc.
+    val functionPattern = Regex("""(?<!`|\$)([a-zA-Z]\([^)]{1,20}\)\s*=\s*[^=\n]{3,50})(?!`|\$)""")
+    result = functionPattern.replace(result) { match ->
+        val func = match.groupValues[1].trim()
+        "`$func`"
+    }
+    
+    // Pattern 3: Standalone expressions with superscripts/subscripts (e.g., "x^2", "a_n")
+    val superSubPattern = Regex("""(?<!`|\$)\b([a-zA-Z][_^][0-9a-zA-Z]+)\b(?!`|\$)""")
+    result = superSubPattern.replace(result) { match ->
+        "`${match.groupValues[1]}`"
+    }
+    
+    // Pattern 4: Fractions like a/b where both are single chars or numbers
+    val fractionPattern = Regex("""(?<!`|\$)\b([a-zA-Z0-9]+)/([a-zA-Z0-9]+)\b(?!`|\$)""")
+    result = fractionPattern.replace(result) { match ->
+        val num = match.groupValues[1]
+        val den = match.groupValues[2]
+        // Only wrap if both parts are short (likely a fraction, not a path)
+        if (num.length <= 3 && den.length <= 3 && !num.contains(".") && !den.contains(".")) {
+            "`$num/$den`"
+        } else {
+            match.value
+        }
+    }
     
     return result
 }

@@ -5,6 +5,10 @@ project("llamavulkan")
 set(LLAMA_CPP_DIR ${CMAKE_SOURCE_DIR}/../../../../llama.cpp)
 get_filename_component(LLAMA_CPP_DIR ${LLAMA_CPP_DIR} ABSOLUTE)
 
+# Path to whisper.cpp (for headers only)
+set(WHISPER_CPP_DIR ${CMAKE_SOURCE_DIR}/../../../../whisper.cpp)
+get_filename_component(WHISPER_CPP_DIR ${WHISPER_CPP_DIR} ABSOLUTE)
+
 set(GGML_DIR ${LLAMA_CPP_DIR}/ggml)
 set(COMMON_DIR ${LLAMA_CPP_DIR}/common)
 set(VENDOR_DIR ${LLAMA_CPP_DIR}/vendor)
@@ -32,12 +36,23 @@ set_target_properties(llama PROPERTIES IMPORTED_LOCATION ${PREBUILT_LIBS_DIR}/li
 add_library(llama-common SHARED IMPORTED)
 set_target_properties(llama-common PROPERTIES IMPORTED_LOCATION ${PREBUILT_LIBS_DIR}/libllama-common.so)
 
-# Build our JNI library
+# Import Whisper pre-built library (for STT)
+add_library(whisper SHARED IMPORTED)
+set_target_properties(whisper PROPERTIES IMPORTED_LOCATION ${PREBUILT_LIBS_DIR}/libwhisper.so)
+
+# Build our JNI library (LlamaGPU)
 add_library(
     llamavulkan
     SHARED
     LlamaVulkan.cpp
     llama_vulkan_jni.cpp
+)
+
+# Build Whisper JNI library (STT)
+add_library(
+    whisper_jni
+    SHARED
+    whisper_jni.cpp
 )
 
 target_include_directories(
@@ -51,9 +66,28 @@ target_include_directories(
     ${VENDOR_DIR}
 )
 
-# Compiler options
+target_include_directories(
+    whisper_jni
+    PUBLIC
+    ${WHISPER_CPP_DIR}/include
+    ${WHISPER_CPP_DIR}
+    ${WHISPER_CPP_DIR}/ggml/include
+)
+
+# Compiler options for llamavulkan
 target_compile_options(
     llamavulkan
+    PUBLIC
+    -fvisibility=hidden 
+    -fvisibility-inlines-hidden
+    -ffunction-sections 
+    -fdata-sections
+    -O3
+)
+
+# Compiler options for whisper_jni
+target_compile_options(
+    whisper_jni
     PUBLIC
     -fvisibility=hidden 
     -fvisibility-inlines-hidden
@@ -74,9 +108,25 @@ target_link_libraries(
     ggml-cpu
 )
 
-# Linker options
+# Link Whisper library
+target_link_libraries(
+    whisper_jni
+    android
+    log
+    whisper
+)
+
+# Linker options for llamavulkan
 target_link_options(
     llamavulkan
+    PRIVATE
+    -Wl,--gc-sections
+    -Wl,--exclude-libs,ALL
+)
+
+# Linker options for whisper_jni
+target_link_options(
+    whisper_jni
     PRIVATE
     -Wl,--gc-sections
     -Wl,--exclude-libs,ALL
