@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -44,6 +45,7 @@ import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -70,7 +72,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import io.shubham0204.startwithsmollm.ui.BenchmarkScreen
+import io.shubham0204.startwithsmollm.ui.BluetoothDeviceSelectionDialog
 import io.shubham0204.startwithsmollm.ui.InferenceInsightsScreen
 import io.shubham0204.startwithsmollm.ui.MarkdownText
 import io.shubham0204.startwithsmollm.ui.ModelSelectionScreen
@@ -78,6 +82,12 @@ import io.shubham0204.startwithsmollm.ui.RagScreen
 import io.shubham0204.startwithsmollm.ui.theme.SmolLMStarterTemplateTheme
 import io.shubham0204.startwithsmollm.voice.VoiceManager
 import io.shubham0204.startwithsmollm.data.ExpertMode
+import io.shubham0204.startwithsmollm.bluetooth.BluetoothInferenceClient
+import io.shubham0204.startwithsmollm.bluetooth.BluetoothInferenceServer
+import io.shubham0204.startwithsmollm.bluetooth.DeviceInfo
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.lifecycle.viewModelScope
 import kotlinx.collections.immutable.ImmutableList
 import android.Manifest
 import android.content.pm.PackageManager
@@ -98,12 +108,58 @@ class MainActivity : ComponentActivity() {
                 val appState by viewModel.appStateFlow.collectAsState()
                 val context = LocalContext.current
                 
+                // Bluetooth state
+                var showBluetoothDialog by remember { mutableStateOf(false) }
+                var bluetoothDevices by remember { mutableStateOf<List<DeviceInfo>>(emptyList()) }
+                var isDiscovering by remember { mutableStateOf(false) }
+                val bluetoothClient = remember { BluetoothInferenceClient(context) }
+                val coroutineScope = rememberCoroutineScope()
+                
                 // Show toast when context is trimmed
                 LaunchedEffect(appState.chatState.toastMessage) {
                     appState.chatState.toastMessage?.let { message ->
                         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                         viewModel.onEvent(AppEvent.ClearToast)
                     }
+                }
+                
+                // Bluetooth device selection dialog
+                if (showBluetoothDialog) {
+                    BluetoothDeviceSelectionDialog(
+                        devices = bluetoothDevices,
+                        isLoading = isDiscovering,
+                        onDeviceSelected = { device ->
+                            showBluetoothDialog = false
+                            // Get current message to send
+                            val lastMessage = appState.chatState.messages.lastOrNull()?.content ?: ""
+                            if (lastMessage.isNotEmpty()) {
+                                coroutineScope.launch {
+                                    val response = bluetoothClient.sendInferenceRequest(
+                                        deviceAddress = device.deviceAddress,
+                                        prompt = lastMessage,
+                                        modelName = appState.chatState.currentModelName
+                                    )
+                                    if (response.success) {
+                                        viewModel.onEvent(AppEvent.ReceiveBluetoothResponse(response.text))
+                                    } else {
+                                        Toast.makeText(
+                                            context,
+                                            "Bluetooth inference failed: ${response.errorMessage}",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                }
+                            }
+                        },
+                        onDismiss = { showBluetoothDialog = false },
+                        onRefresh = {
+                            coroutineScope.launch {
+                                isDiscovering = true
+                                bluetoothDevices = bluetoothClient.discoverDevices()
+                                isDiscovering = false
+                            }
+                        }
+                    )
                 }
                 
                 AnimatedContent(
@@ -158,6 +214,14 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onBenchmarkClick = {
                                     viewModel.onEvent(AppEvent.OpenBenchmark)
+                                },
+                                onBluetoothClick = {
+                                    showBluetoothDialog = true
+                                    coroutineScope.launch {
+                                        isDiscovering = true
+                                        bluetoothDevices = bluetoothClient.discoverDevices()
+                                        isDiscovering = false
+                                    }
                                 },
                                 onRagClick = {
                                     viewModel.onEvent(AppEvent.OpenRag)
@@ -247,6 +311,7 @@ class MainActivity : ComponentActivity() {
         onQuerySubmit: (String) -> Unit,
         onClearChat: () -> Unit,
         onBenchmarkClick: () -> Unit,
+        onBluetoothClick: () -> Unit = {},
         onRagClick: () -> Unit = {},
         onStartVoiceInput: () -> Unit = {},
         onStopVoiceInput: () -> Unit = {},
@@ -344,6 +409,15 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         
+                        // Bluetooth inference button
+                        IconButton(onClick = onBluetoothClick) {
+                            Icon(
+                                imageVector = Icons.Default.Bluetooth,
+                                contentDescription = "Bluetooth Inference",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        
                         // Expert mode - single ⚡ button for Inference Insights + Performance
                         if (isExpertMode) {
                             IconButton(onClick = { showInferenceInsights = true }) {
@@ -381,13 +455,15 @@ class MainActivity : ComponentActivity() {
                 )
                 MessageInput(
                     modelLoadingState = uiState.modelLoadingState,
+                    modelInferenceState = uiState.modelInferenceState,
                     voiceState = voiceState,
                     onQuerySubmit = onQuerySubmit,
                     onStartVoiceInput = onStartVoiceInput,
                     onStopVoiceInput = onStopVoiceInput,
                     onCancelVoiceInput = onCancelVoiceInput,
                     onToggleAutoSpeak = onToggleAutoSpeak,
-                    onStopSpeaking = onStopSpeaking
+                    onStopSpeaking = onStopSpeaking,
+                    onStopGeneration = { viewModel.stopGeneration() }
                 )
             }
         }
@@ -411,13 +487,18 @@ class MainActivity : ComponentActivity() {
             state = listState,
             modifier = modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { Spacer(modifier = Modifier.height(12.dp)) }
             
             items(messages) { message ->
-                ChatMessageBubble(message)
+                ChatMessageBubble(
+                    message = message,
+                    onSpeakClick = { text -> 
+                        viewModel.speakText(text)
+                    }
+                )
             }
             
             if (modelInferenceState == ModelInferenceState.LOADING) {
@@ -426,61 +507,117 @@ class MainActivity : ComponentActivity() {
                 }
             }
             
-            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { Spacer(modifier = Modifier.height(80.dp)) }
         }
     }
 
     @Composable
-    private fun ChatMessageBubble(message: ChatMessage) {
+    private fun ChatMessageBubble(
+        message: ChatMessage,
+        onSpeakClick: ((String) -> Unit)? = null
+    ) {
         val isHuman = message.userRole == UserRole.HUMAN
         
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp),
             horizontalArrangement = if (isHuman) Arrangement.End else Arrangement.Start
         ) {
             if (isHuman) {
-                // User message - simple bubble
-                Card(
-                    modifier = Modifier.widthIn(max = 300.dp),
-                    shape = RoundedCornerShape(
-                        topStart = 16.dp,
-                        topEnd = 16.dp,
-                        bottomStart = 16.dp,
-                        bottomEnd = 4.dp
-                    ),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primary
-                    )
+                // User message - modern bubble with tail
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.85f)
+                        .padding(start = 32.dp)
                 ) {
-                    Text(
-                        text = message.content,
-                        modifier = Modifier.padding(12.dp),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
+                    Surface(
+                        shape = RoundedCornerShape(
+                            topStart = 20.dp,
+                            topEnd = 20.dp,
+                            bottomStart = 20.dp,
+                            bottomEnd = 4.dp
+                        ),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shadowElevation = 1.dp
+                    ) {
+                        Text(
+                            text = message.content,
+                            modifier = Modifier.padding(
+                                horizontal = 16.dp,
+                                vertical = 10.dp
+                            ),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            lineHeight = 20.sp
+                        )
+                    }
                 }
             } else {
-                // AI response - full width with markdown support
-                Column {
+                // AI response - modern bubble with speak button
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth(0.98f)
+                        .padding(end = 8.dp)
+                ) {
                     Surface(
-                        modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(
                             topStart = 4.dp,
-                            topEnd = 16.dp,
-                            bottomStart = if (message.citations.isEmpty()) 16.dp else 4.dp,
-                            bottomEnd = if (message.citations.isEmpty()) 16.dp else 4.dp
+                            topEnd = 20.dp,
+                            bottomStart = 20.dp,
+                            bottomEnd = 20.dp
                         ),
-                        color = MaterialTheme.colorScheme.surfaceVariant
+                        color = MaterialTheme.colorScheme.surface,
+                        shadowElevation = 2.dp,
+                        tonalElevation = 1.dp
                     ) {
-                        MarkdownText(
-                            text = message.content,
-                            modifier = Modifier.padding(12.dp),
-                            defaultColor = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Column {
+                            MarkdownText(
+                                text = message.content,
+                                modifier = Modifier.padding(
+                                    start = 16.dp,
+                                    end = 16.dp,
+                                    top = 12.dp,
+                                    bottom = 8.dp
+                                ),
+                                defaultColor = MaterialTheme.colorScheme.onSurface
+                            )
+                            
+                            // Speak button
+                            if (onSpeakClick != null && message.content.isNotBlank()) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Surface(
+                                        onClick = { onSpeakClick(message.content) },
+                                        modifier = Modifier.size(36.dp),
+                                        shape = CircleShape,
+                                        color = MaterialTheme.colorScheme.secondaryContainer
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.VolumeUp,
+                                                contentDescription = "Speak this message",
+                                                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     
                     // Citations section
                     if (message.citations.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(4.dp))
                         CitationsSection(citations = message.citations)
                     }
                 }
@@ -590,27 +727,36 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun ThinkingIndicator() {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp),
             horizontalArrangement = Arrangement.Start
         ) {
             Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant
+                shape = RoundedCornerShape(
+                    topStart = 4.dp,
+                    topEnd = 20.dp,
+                    bottomStart = 20.dp,
+                    bottomEnd = 20.dp
+                ),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 2.dp,
+                tonalElevation = 1.dp
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.5.dp,
                         color = MaterialTheme.colorScheme.primary
                     )
                     Text(
                         text = "Thinking...",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
             }
@@ -620,13 +766,15 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun MessageInput(
         modelLoadingState: ModelLoadingState,
+        modelInferenceState: ModelInferenceState,
         voiceState: VoiceManager.VoiceState = VoiceManager.VoiceState(),
         onQuerySubmit: (String) -> Unit,
         onStartVoiceInput: () -> Unit = {},
         onStopVoiceInput: () -> Unit = {},
         onCancelVoiceInput: () -> Unit = {},
         onToggleAutoSpeak: () -> Unit = {},
-        onStopSpeaking: () -> Unit = {}
+        onStopSpeaking: () -> Unit = {},
+        onStopGeneration: () -> Unit = {}
     ) {
         var queryText by remember { mutableStateOf("") }
         val context = LocalContext.current
@@ -725,30 +873,17 @@ class MainActivity : ComponentActivity() {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Auto-speak toggle
-                    IconButton(
-                        onClick = onToggleAutoSpeak,
-                        modifier = Modifier.size(40.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (voiceState.autoSpeak) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
-                            contentDescription = if (voiceState.autoSpeak) "Auto-speak on" else "Auto-speak off",
-                            tint = if (voiceState.autoSpeak) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            }
-                        )
-                    }
-                    
                     OutlinedTextField(
                         value = queryText,
                         onValueChange = { queryText = it },
                         modifier = Modifier.weight(1f),
-                        enabled = modelLoadingState == ModelLoadingState.SUCCESS && !voiceState.isListening,
+                        enabled = modelLoadingState == ModelLoadingState.SUCCESS && 
+                                  !voiceState.isListening && 
+                                  modelInferenceState != ModelInferenceState.LOADING,
                         placeholder = {
                             Text(
                                 text = when {
+                                    modelInferenceState == ModelInferenceState.LOADING -> "Generating..."
                                     voiceState.isListening -> "Listening..."
                                     voiceState.isTranscribing -> "Processing..."
                                     modelLoadingState == ModelLoadingState.LOADING -> "Loading model..."
@@ -812,33 +947,52 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                             
-                            // Send button
-                            Surface(
-                                shape = RoundedCornerShape(50),
-                                color = if (queryText.isNotBlank()) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceVariant
-                                }
-                            ) {
-                                IconButton(
-                                    onClick = {
-                                        if (queryText.isNotBlank()) {
-                                            onQuerySubmit(queryText)
-                                            queryText = ""
-                                        }
-                                    },
-                                    enabled = queryText.isNotBlank()
+                            // Send/Stop button
+                            if (modelInferenceState == ModelInferenceState.LOADING) {
+                                // Stop button during generation
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = MaterialTheme.colorScheme.error
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Send,
-                                        contentDescription = "Send",
-                                        tint = if (queryText.isNotBlank()) {
-                                            MaterialTheme.colorScheme.onPrimary
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        }
-                                    )
+                                    IconButton(
+                                        onClick = onStopGeneration
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Stop,
+                                            contentDescription = "Stop generation",
+                                            tint = MaterialTheme.colorScheme.onError
+                                        )
+                                    }
+                                }
+                            } else {
+                                // Send button
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = if (queryText.isNotBlank()) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    }
+                                ) {
+                                    IconButton(
+                                        onClick = {
+                                            if (queryText.isNotBlank()) {
+                                                onQuerySubmit(queryText)
+                                                queryText = ""
+                                            }
+                                        },
+                                        enabled = queryText.isNotBlank()
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Send,
+                                            contentDescription = "Send",
+                                            tint = if (queryText.isNotBlank()) {
+                                                MaterialTheme.colorScheme.onPrimary
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }

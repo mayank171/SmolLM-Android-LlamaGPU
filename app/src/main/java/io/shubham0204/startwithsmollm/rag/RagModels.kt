@@ -70,10 +70,12 @@ data class ChunkSearchResult(
  */
 data class RagConfig(
     val chunkSize: Int = 768,           // Characters per chunk (~192 tokens) - balanced for quality & speed
-    val chunkOverlap: Int = 75,         // 10% overlap between chunks
-    val topK: Int = 3,                  // Number of chunks to retrieve - better coverage
-    val similarityThreshold: Float = 0.3f,  // Minimum similarity to include
-    val embeddingDimension: Int = 384   // all-MiniLM-L6-v2 dimension
+    val chunkOverlap: Int = 150,        // ~20% overlap between chunks for better context continuity
+    val topK: Int = 7,                  // Retrieve 7 chunks for re-ranking (balanced for context)
+    val similarityThreshold: Float = 0.25f,  // Moderate threshold for quality candidates
+    val embeddingDimension: Int = 384,  // all-MiniLM-L6-v2 dimension
+    val enableReranking: Boolean = true,    // Re-rank retrieved chunks by relevance
+    val finalTopK: Int = 4              // Return top 4 after re-ranking
 )
 
 /**

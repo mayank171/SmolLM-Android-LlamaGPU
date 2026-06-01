@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    kotlin("plugin.serialization") version "1.9.22"
 }
 
 android {
@@ -61,6 +62,14 @@ android {
         noCompress += "gguf"
         noCompress += "onnx"  // For embedding model
     }
+    
+    packaging {
+        resources {
+            // Remove CJK (Chinese, Japanese, Korean) fonts to save ~50 MB
+            // Note: This excludes font mapping files for Asian languages
+            excludes += "/com/tom_roush/fontbox/resources/cmap/*"
+        }
+    }
 }
 
 dependencies {
@@ -86,6 +95,9 @@ dependencies {
     
     // ML Kit for OCR (text recognition from images)
     implementation("com.google.mlkit:text-recognition:16.0.0")
+    
+    // Kotlinx Serialization for Bluetooth data transfer
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
 
     // TODO: Step 1
     implementation(files("libs/smollm-debug.aar"))
