@@ -25,6 +25,7 @@ class LlamaVulkan {
     std::vector<llama_chat_message> _messages;
     std::vector<char> _formattedMessages;
     std::vector<llama_token> _promptTokens;
+    std::vector<llama_token> _cachedTokens;  // Tokens already in KV cache
     const char* _chatTemplate = nullptr;
 
     std::string _response;

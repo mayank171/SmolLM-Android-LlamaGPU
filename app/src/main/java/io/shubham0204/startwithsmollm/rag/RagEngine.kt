@@ -261,13 +261,23 @@ class RagEngine(private val context: Context) {
             }
             
             Log.d(TAG, "Found ${results.size} relevant chunks")
-            for ((i, result) in results.withIndex()) {
+            
+            // 3. Re-rank results if enabled
+            val finalResults = if (config.enableReranking && results.size > config.finalTopK) {
+                Log.d(TAG, "Re-ranking top ${config.topK} chunks to select best ${config.finalTopK}...")
+                rerankChunks(userQuery, results).take(config.finalTopK)
+            } else {
+                results.take(config.finalTopK)
+            }
+            
+            Log.d(TAG, "Final ${finalResults.size} chunks after re-ranking:")
+            for ((i, result) in finalResults.withIndex()) {
                 Log.d(TAG, "  [${i+1}] Score: ${"%.3f".format(result.score)} | ${result.searchType} | ${result.documentName}")
                 Log.d(TAG, "      Preview: ${result.chunk.text.take(80)}...")
             }
             
-            // 3. Generate citations
-            val citations = results.mapIndexed { index, result ->
+            // 4. Generate citations
+            val citations = finalResults.mapIndexed { index, result ->
                 Citation(
                     index = index + 1,
                     documentName = result.documentName,
@@ -277,14 +287,14 @@ class RagEngine(private val context: Context) {
                 )
             }
             
-            // 4. Build augmented prompt
-            val augmentedPrompt = buildAugmentedPrompt(userQuery, results)
+            // 5. Build augmented prompt
+            val augmentedPrompt = buildAugmentedPrompt(userQuery, finalResults)
             
             Log.d(TAG, "Augmented prompt length: ${augmentedPrompt.length} chars")
             
             RagResult(
                 query = userQuery,
-                retrievedChunks = results,
+                retrievedChunks = finalResults,
                 augmentedPrompt = augmentedPrompt,
                 citations = citations
             )
@@ -311,6 +321,41 @@ class RagEngine(private val context: Context) {
      * Get current search mode
      */
     fun getSearchMode(): SearchMode = searchMode
+    
+    /**
+     * Re-rank chunks by query relevance using multiple signals
+     * Combines: keyword overlap, position diversity, and original scores
+     */
+    private fun rerankChunks(query: String, chunks: List<ChunkSearchResult>): List<ChunkSearchResult> {
+        val queryTokens = query.lowercase().split(Regex("\\W+")).filter { it.length > 2 }.toSet()
+        
+        return chunks.map { result ->
+            val chunkTokens = result.chunk.text.lowercase().split(Regex("\\W+")).toSet()
+            
+            // 1. Keyword overlap score (Jaccard similarity)
+            val overlap = queryTokens.intersect(chunkTokens).size.toFloat()
+            val union = queryTokens.union(chunkTokens).size.toFloat()
+            val keywordScore = if (union > 0) overlap / union else 0f
+            
+            // 2. Query term frequency in chunk
+            val termFrequency = queryTokens.sumOf { token ->
+                chunkTokens.count { it == token }
+            }.toFloat() / chunkTokens.size.coerceAtLeast(1)
+            
+            // 3. Position diversity bonus (prefer chunks from different positions)
+            val positionScore = 1.0f / (1.0f + result.chunk.position * 0.1f)
+            
+            // 4. Combined re-ranking score
+            val rerankScore = (
+                result.score * 0.4f +           // Original retrieval score
+                keywordScore * 0.3f +            // Keyword overlap
+                termFrequency * 0.2f +           // Term frequency
+                positionScore * 0.1f             // Position diversity
+            ).coerceIn(0f, 1f)
+            
+            result.copy(score = rerankScore)
+        }.sortedByDescending { it.score }
+    }
     
     /**
      * Build the augmented prompt with retrieved context

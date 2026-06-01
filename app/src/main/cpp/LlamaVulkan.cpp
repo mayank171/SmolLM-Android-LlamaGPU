@@ -218,9 +218,51 @@ void LlamaVulkan::startCompletion(const char* query) {
     std::string prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
     _promptTokens = common_tokenize(llama_model_get_vocab(_model), prompt, true, true);
 
+    // PROMPT CACHING: Find how many tokens match the cached tokens
+    size_t commonPrefix = 0;
+    size_t minLen = std::min(_cachedTokens.size(), _promptTokens.size());
+    for (size_t i = 0; i < minLen; i++) {
+        if (_cachedTokens[i] == _promptTokens[i]) {
+            commonPrefix++;
+        } else {
+            break;
+        }
+    }
+    
+    // If cache diverged, we need to clear KV cache from that point
+    if (commonPrefix < _cachedTokens.size()) {
+        // Clear KV cache entries after the common prefix
+        llama_memory_t mem = llama_get_memory(_ctx);
+        if (mem && commonPrefix > 0) {
+            // Remove tokens from commonPrefix onwards
+            llama_memory_seq_rm(mem, 0, commonPrefix, -1);
+        } else if (mem && commonPrefix == 0) {
+            // Complete mismatch, clear everything
+            llama_memory_clear(mem, true);
+        }
+    }
+    
+    // Calculate how many NEW tokens to process
+    size_t newTokensStart = commonPrefix;
+    size_t newTokensCount = _promptTokens.size() - commonPrefix;
+    
+    LOGi("Prompt caching: %zu cached, %zu new tokens (total: %zu)", 
+         commonPrefix, newTokensCount, _promptTokens.size());
+    
+    // Update cached tokens for next time
+    _cachedTokens = _promptTokens;
+    
+    // Create batch with only NEW tokens
     _batch = new llama_batch();
-    _batch->token = _promptTokens.data();
-    _batch->n_tokens = _promptTokens.size();
+    if (newTokensCount > 0) {
+        // Point to the new tokens portion
+        _batch->token = _promptTokens.data() + newTokensStart;
+        _batch->n_tokens = newTokensCount;
+    } else {
+        // Edge case: all tokens cached (shouldn't happen normally)
+        _batch->token = _promptTokens.data() + _promptTokens.size() - 1;
+        _batch->n_tokens = 1;
+    }
 }
 
 bool LlamaVulkan::_isValidUtf8(const char* response) {
@@ -288,6 +330,24 @@ std::string LlamaVulkan::completionLoop() {
 void LlamaVulkan::stopCompletion() {
     if (_storeChats) {
         addChatMessage(_response.c_str(), "assistant");
+        
+        // Update cached tokens to include the assistant's response
+        // This ensures next query can reuse the full conversation KV cache
+        std::vector<common_chat_msg> messages;
+        for (const llama_chat_message& message : _messages) {
+            common_chat_msg msg;
+            msg.role = message.role;
+            msg.content = message.content;
+            messages.push_back(msg);
+        }
+        common_chat_templates_inputs inputs;
+        inputs.use_jinja = true;
+        inputs.messages = messages;
+        auto templates = common_chat_templates_init(_model, _chatTemplate);
+        std::string fullPrompt = common_chat_templates_apply(templates.get(), inputs).prompt;
+        _cachedTokens = common_tokenize(llama_model_get_vocab(_model), fullPrompt, true, true);
+        
+        LOGi("Updated prompt cache: %zu tokens", _cachedTokens.size());
     }
     _response.clear();
 }
@@ -388,6 +448,7 @@ void LlamaVulkan::clearChat() {
     _formattedMessages.clear();
     _response.clear();
     _cacheResponseTokens.clear();
+    _cachedTokens.clear();  // Clear prompt cache
     
     // Reset context (clear KV cache) - use new API
     if (_ctx) {

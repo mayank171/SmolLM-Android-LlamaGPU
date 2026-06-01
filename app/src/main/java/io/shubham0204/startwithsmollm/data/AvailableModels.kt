@@ -42,8 +42,8 @@ object AvailableModels {
             name = "SmolLM 360M",
             description = "Smallest and fastest. Basic conversations only.",
             sizeInMB = 219,
-            downloadUrl = "https://huggingface.co/shubham0204/SmolLM-360M-Instruct-GGUF/resolve/main/SmolLM-360M-Instruct.Q4_0.gguf",
-            fileName = "SmolLM-360M-Instruct.Q4_0.gguf",
+            downloadUrl = "https://huggingface.co/HuggingFaceTB/SmolLM-360M-Instruct-GGUF/resolve/main/smollm-360m-instruct-add-basics-q4_0.gguf",
+            fileName = "smollm-360m-instruct-add-basics-q4_0.gguf",
             parameters = "360M",
             quantization = "Q4_0",
             maxContextSize = 2048  // SmolLM native context is 2K

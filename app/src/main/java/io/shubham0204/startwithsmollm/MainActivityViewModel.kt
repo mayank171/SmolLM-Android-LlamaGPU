@@ -111,6 +111,8 @@ sealed interface AppEvent {
     // Performance dashboard events
     data object OpenPerformanceDashboard : AppEvent
     data object BackFromPerformanceDashboard : AppEvent
+    // Bluetooth events
+    data class ReceiveBluetoothResponse(val response: String) : AppEvent
 }
 
 class MainActivityViewModel(application: Application) : AndroidViewModel(application) {
@@ -128,6 +130,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private var currentModelPath: String = ""
     private var currentModel: ModelInfo? = null
     private var downloadJob: Job? = null
+    private var inferenceJob: Job? = null
     private var estimatedTokenCount: Int = 0
     private var maxContextSize: Int = deviceProfile.maxContextSize
     
@@ -205,6 +208,23 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             // Performance dashboard events
             is AppEvent.OpenPerformanceDashboard -> openPerformanceDashboard()
             is AppEvent.BackFromPerformanceDashboard -> backFromPerformanceDashboard()
+            // Bluetooth events
+            is AppEvent.ReceiveBluetoothResponse -> receiveBluetoothResponse(event.response)
+        }
+    }
+    
+    private fun receiveBluetoothResponse(response: String) {
+        _appStateFlow.update { state ->
+            val newMessages = state.chatState.messages + ChatMessage(
+                content = response,
+                userRole = UserRole.LLM
+            )
+            state.copy(
+                chatState = state.chatState.copy(
+                    messages = newMessages.toImmutableList(),
+                    modelInferenceState = ModelInferenceState.IDLE
+                )
+            )
         }
     }
     
@@ -310,6 +330,19 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     /** Stop TTS */
     fun stopSpeaking() {
         voiceManager.stopSpeaking()
+    }
+    
+    /** Stop ongoing inference generation */
+    fun stopGeneration() {
+        inferenceJob?.cancel()
+        inferenceJob = null
+        _appStateFlow.update { state ->
+            state.copy(
+                chatState = state.chatState.copy(
+                    modelInferenceState = ModelInferenceState.IDLE
+                )
+            )
+        }
     }
     
     /** Toggle auto-speak for LLM responses */
@@ -487,7 +520,13 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     
     private fun backFromBenchmark() {
         _appStateFlow.update { state ->
-            state.copy(currentScreen = AppScreen.CHAT)
+            // Go back to chat if model is loaded, otherwise go to model selection
+            val targetScreen = if (state.chatState.modelLoadingState == ModelLoadingState.SUCCESS) {
+                AppScreen.CHAT
+            } else {
+                AppScreen.MODEL_SELECTION
+            }
+            state.copy(currentScreen = targetScreen)
         }
     }
     
@@ -636,6 +675,9 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     }
     
     private fun processQuery(query: String) {
+        // Cancel any existing inference
+        inferenceJob?.cancel()
+        
         // For single-turn models (like Gemma), reset context each query
         if (currentModel?.supportsMultiTurn == false) {
             estimatedTokenCount = estimateTokens(query)
@@ -655,7 +697,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             )
         }
         
-        viewModelScope.launch(Dispatchers.Default) {
+        inferenceJob = viewModelScope.launch(Dispatchers.Default) {
             try {
                 // Check REAL context usage from llama.cpp - trim at 70% to leave room for response
                 val realUsage = calculateContextUsage()
@@ -799,11 +841,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     avgItlMs = avgItl.toFloat()
                 )
                 
-                // Auto-speak response if enabled
-                val finalResponse = responseBuilder.toString()
-                if (voiceManager.state.value.autoSpeak && finalResponse.isNotBlank()) {
-                    voiceManager.speak(finalResponse)
-                }
+                // Don't auto-speak - user can click speak button on message
                 
                 withContext(Dispatchers.Main) {
                     _appStateFlow.update { state ->

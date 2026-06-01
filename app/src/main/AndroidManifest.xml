@@ -6,6 +6,14 @@
     
     <!-- Voice Input (Whisper STT) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    
+    <!-- Bluetooth for distributed inference -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".SmolLMApplication"
