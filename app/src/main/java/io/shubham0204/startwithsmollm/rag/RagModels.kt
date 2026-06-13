@@ -71,11 +71,19 @@ data class ChunkSearchResult(
 data class RagConfig(
     val chunkSize: Int = 768,           // Characters per chunk (~192 tokens) - balanced for quality & speed
     val chunkOverlap: Int = 150,        // ~20% overlap between chunks for better context continuity
-    val topK: Int = 7,                  // Retrieve 7 chunks for re-ranking (balanced for context)
+    val topK: Int = 7,                  // Default retrieve count (balanced for context)
     val similarityThreshold: Float = 0.25f,  // Moderate threshold for quality candidates
     val embeddingDimension: Int = 384,  // all-MiniLM-L6-v2 dimension
     val enableReranking: Boolean = true,    // Re-rank retrieved chunks by relevance
-    val finalTopK: Int = 4              // Return top 4 after re-ranking
+    val finalTopK: Int = 4,             // Default return count after re-ranking
+    
+    // Adaptive retrieval settings
+    val quickTopK: Int = 5,             // Initial quick retrieval
+    val simpleTopK: Int = 4,            // For high-confidence simple questions
+    val tableTopK: Int = 12,            // For questions with table content
+    val lowConfidenceTopK: Int = 10,    // For low-confidence queries
+    val highConfidenceThreshold: Float = 0.7f,   // Score above this = high confidence
+    val lowConfidenceThreshold: Float = 0.5f     // Score below this = low confidence
 )
 
 /**
