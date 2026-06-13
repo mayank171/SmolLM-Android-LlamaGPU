@@ -48,13 +48,87 @@ class TableExtractor {
     }
     
     /**
-     * Simple table detection using text alignment heuristics
+     * Enhanced table detection using multiple heuristics
      * Detects tables by looking for:
      * - Multiple lines with similar structure
      * - Aligned columns
      * - Consistent spacing
+     * - Bordered tables (┌─┬─┐ or +--+--+)
+     * - Merged cells
+     * - Multi-line cells
      */
     fun detectSimpleTables(text: String, pageNumber: Int): List<ExtractedTable> {
+        val tables = mutableListOf<ExtractedTable>()
+        
+        // Method 1: Detect bordered tables (high confidence)
+        tables.addAll(detectBorderedTables(text, pageNumber))
+        
+        // Method 2: Detect space-aligned tables
+        tables.addAll(detectSpaceAlignedTables(text, pageNumber))
+        
+        // Remove duplicates (same region detected by multiple methods)
+        return deduplicateTables(tables)
+    }
+    
+    /**
+     * Detect tables with visible borders: ┌─┬─┐ or +--+--+
+     */
+    private fun detectBorderedTables(text: String, pageNumber: Int): List<ExtractedTable> {
+        val tables = mutableListOf<ExtractedTable>()
+        val lines = text.split("\n")
+        
+        var inTable = false
+        var tableLines = mutableListOf<String>()
+        var tableCaption: String? = null
+        
+        for ((i, line) in lines.withIndex()) {
+            // Check for caption
+            if (line.trim().matches(Regex("^Table\\s+\\d+:.*", RegexOption.IGNORE_CASE))) {
+                tableCaption = line.trim()
+                continue
+            }
+            
+            when {
+                // Table start: ┌─────┬───┐ or +-----+---+
+                isTableTopBorder(line) -> {
+                    inTable = true
+                    tableLines.add(line)
+                }
+                
+                // Table end: └─────┴───┘ or +-----+---+
+                isTableBottomBorder(line) && inTable -> {
+                    tableLines.add(line)
+                    if (tableLines.size >= 3) {
+                        val markdown = parseBorderedTable(tableLines)
+                        tables.add(ExtractedTable(
+                            pageNumber = pageNumber,
+                            markdown = markdown,
+                            rawText = tableLines.joinToString("\n"),
+                            rowCount = countDataRows(tableLines),
+                            columnCount = estimateBorderedColumns(tableLines),
+                            caption = tableCaption,
+                            confidence = 0.95f  // High confidence for bordered tables
+                        ))
+                    }
+                    tableLines.clear()
+                    tableCaption = null
+                    inTable = false
+                }
+                
+                // Inside table
+                inTable -> {
+                    tableLines.add(line)
+                }
+            }
+        }
+        
+        return tables
+    }
+    
+    /**
+     * Detect space-aligned tables (original method, enhanced)
+     */
+    private fun detectSpaceAlignedTables(text: String, pageNumber: Int): List<ExtractedTable> {
         val tables = mutableListOf<ExtractedTable>()
         val lines = text.split("\n")
         
@@ -63,16 +137,21 @@ class TableExtractor {
         var tableCaption: String? = null
         
         for ((i, line) in lines.withIndex()) {
-            // Check if this line is a table caption (e.g., "Table 1: ...")
+            // Skip if already part of bordered table
+            if (isTableBorder(line)) continue
+            
+            // Check for caption
             if (line.trim().matches(Regex("^Table\\s+\\d+:.*", RegexOption.IGNORE_CASE))) {
                 tableCaption = line.trim()
                 continue
             }
             
-            // Simple heuristic: lines with multiple spaces might be table rows
+            // Enhanced detection: check for aligned columns
             val spacedParts = line.split(Regex("\\s{2,}"))
+            val hasTabSeparators = line.contains("\t")
+            val hasPipeSeparators = line.contains("|") && line.count { it == '|' } >= 2
             
-            if (spacedParts.size >= 3) {
+            if (spacedParts.size >= 3 || hasTabSeparators || hasPipeSeparators) {
                 // Potential table row
                 if (tableStart == -1) {
                     tableStart = i
@@ -81,34 +160,44 @@ class TableExtractor {
             } else {
                 // End of potential table
                 if (tableRows.size >= 3) {
-                    // Convert to markdown
                     val markdown = convertAlignedTextToTable(tableRows)
-                    tables.add(ExtractedTable(
-                        pageNumber = pageNumber,
-                        markdown = markdown,
-                        rawText = tableRows.joinToString("\n"),
-                        rowCount = tableRows.size,
-                        columnCount = estimateColumnCount(tableRows),
-                        caption = tableCaption
-                    ))
+                    val confidence = calculateTableConfidence(tableRows)
+                    
+                    // Only add if confidence is reasonable
+                    if (confidence >= 0.5f) {
+                        tables.add(ExtractedTable(
+                            pageNumber = pageNumber,
+                            markdown = markdown,
+                            rawText = tableRows.joinToString("\n"),
+                            rowCount = tableRows.size,
+                            columnCount = estimateColumnCount(tableRows),
+                            caption = tableCaption,
+                            confidence = confidence
+                        ))
+                    }
                 }
                 tableStart = -1
                 tableRows.clear()
-                tableCaption = null  // Reset caption after table
+                tableCaption = null
             }
         }
         
         // Check for table at end of page
         if (tableRows.size >= 3) {
             val markdown = convertAlignedTextToTable(tableRows)
-            tables.add(ExtractedTable(
-                pageNumber = pageNumber,
-                markdown = markdown,
-                rawText = tableRows.joinToString("\n"),
-                rowCount = tableRows.size,
-                columnCount = estimateColumnCount(tableRows),
-                caption = tableCaption
-            ))
+            val confidence = calculateTableConfidence(tableRows)
+            
+            if (confidence >= 0.5f) {
+                tables.add(ExtractedTable(
+                    pageNumber = pageNumber,
+                    markdown = markdown,
+                    rawText = tableRows.joinToString("\n"),
+                    rowCount = tableRows.size,
+                    columnCount = estimateColumnCount(tableRows),
+                    caption = tableCaption,
+                    confidence = confidence
+                ))
+            }
         }
         
         return tables
@@ -231,6 +320,173 @@ class TableExtractor {
     }
     
     /**
+     * Check if line is a table top border
+     */
+    private fun isTableTopBorder(line: String): Boolean {
+        val trimmed = line.trim()
+        return trimmed.matches(Regex("^[┌┬┐+─-]{3,}$")) ||
+               trimmed.matches(Regex("^\\+[-=]{2,}\\+.*$")) ||
+               trimmed.startsWith("┌") && trimmed.contains("┬") && trimmed.endsWith("┐")
+    }
+    
+    /**
+     * Check if line is a table bottom border
+     */
+    private fun isTableBottomBorder(line: String): Boolean {
+        val trimmed = line.trim()
+        return trimmed.matches(Regex("^[└┴┘+─-]{3,}$")) ||
+               trimmed.matches(Regex("^\\+[-=]{2,}\\+.*$")) ||
+               trimmed.startsWith("└") && trimmed.contains("┴") && trimmed.endsWith("┘")
+    }
+    
+    /**
+     * Check if line is any table border
+     */
+    private fun isTableBorder(line: String): Boolean {
+        val trimmed = line.trim()
+        return isTableTopBorder(line) || 
+               isTableBottomBorder(line) ||
+               trimmed.matches(Regex("^[├┼┤+│|─-]{3,}$"))
+    }
+    
+    /**
+     * Parse bordered table to markdown
+     */
+    private fun parseBorderedTable(lines: List<String>): String {
+        val dataRows = lines.filter { line ->
+            !isTableBorder(line) && line.trim().isNotEmpty()
+        }
+        
+        if (dataRows.isEmpty()) return ""
+        
+        // Split by | or │
+        val rows = dataRows.map { line ->
+            line.split(Regex("[|│]"))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+        }
+        
+        return tableToMarkdown(rows)
+    }
+    
+    /**
+     * Count data rows (excluding borders)
+     */
+    private fun countDataRows(lines: List<String>): Int {
+        return lines.count { !isTableBorder(it) && it.trim().isNotEmpty() }
+    }
+    
+    /**
+     * Estimate column count for bordered table
+     */
+    private fun estimateBorderedColumns(lines: List<String>): Int {
+        val dataLines = lines.filter { !isTableBorder(it) && it.trim().isNotEmpty() }
+        if (dataLines.isEmpty()) return 0
+        
+        return dataLines.maxOfOrNull { line ->
+            line.count { it == '|' || it == '│' } + 1
+        } ?: 0
+    }
+    
+    /**
+     * Calculate confidence score for detected table
+     */
+    private fun calculateTableConfidence(rows: List<String>): Float {
+        if (rows.isEmpty()) return 0f
+        
+        var score = 1.0f
+        
+        // Check column consistency
+        val columnCounts = rows.map { row ->
+            row.split(Regex("\\s{2,}|\\t|\\|")).filter { it.trim().isNotEmpty() }.size
+        }
+        val avgColumns = columnCounts.average()
+        val columnVariance = columnCounts.map { (it - avgColumns) * (it - avgColumns) }.average()
+        
+        // Penalize high variance in column count
+        if (columnVariance > 2.0) score -= 0.3f
+        
+        // Check for consistent spacing
+        val hasConsistentSpacing = rows.all { row ->
+            row.contains(Regex("\\s{2,}")) || row.contains("\\t") || row.contains("|")
+        }
+        if (!hasConsistentSpacing) score -= 0.2f
+        
+        // Check for numeric content (tables often have numbers)
+        val hasNumbers = rows.any { it.contains(Regex("\\d+")) }
+        if (hasNumbers) score += 0.1f
+        
+        // Check for header indicators (first row different)
+        if (rows.size >= 2) {
+            val firstRowLength = rows[0].length
+            val avgOtherLength = rows.drop(1).map { it.length }.average()
+            if (kotlin.math.abs(firstRowLength - avgOtherLength) < firstRowLength * 0.3) {
+                score += 0.1f  // Similar lengths suggest proper table
+            }
+        }
+        
+        return score.coerceIn(0f, 1f)
+    }
+    
+    /**
+     * Remove duplicate tables detected by multiple methods
+     */
+    private fun deduplicateTables(tables: List<ExtractedTable>): List<ExtractedTable> {
+        if (tables.size <= 1) return tables
+        
+        val deduplicated = mutableListOf<ExtractedTable>()
+        val used = mutableSetOf<Int>()
+        
+        for (i in tables.indices) {
+            if (i in used) continue
+            
+            var best = tables[i]
+            used.add(i)
+            
+            // Check for overlapping tables
+            for (j in (i + 1) until tables.size) {
+                if (j in used) continue
+                
+                if (tablesOverlap(tables[i], tables[j])) {
+                    // Keep the one with higher confidence
+                    if (tables[j].confidence > best.confidence) {
+                        best = tables[j]
+                    }
+                    used.add(j)
+                }
+            }
+            
+            deduplicated.add(best)
+        }
+        
+        return deduplicated
+    }
+    
+    /**
+     * Check if two tables overlap (same content region)
+     */
+    private fun tablesOverlap(t1: ExtractedTable, t2: ExtractedTable): Boolean {
+        if (t1.pageNumber != t2.pageNumber) return false
+        
+        // Simple overlap check: if raw text is very similar
+        val similarity = calculateTextSimilarity(t1.rawText, t2.rawText)
+        return similarity > 0.7f
+    }
+    
+    /**
+     * Calculate text similarity (simple Jaccard similarity)
+     */
+    private fun calculateTextSimilarity(text1: String, text2: String): Float {
+        val words1 = text1.split(Regex("\\s+")).toSet()
+        val words2 = text2.split(Regex("\\s+")).toSet()
+        
+        val intersection = words1.intersect(words2).size
+        val union = words1.union(words2).size
+        
+        return if (union > 0) intersection.toFloat() / union else 0f
+    }
+    
+    /**
      * Custom text stripper for table detection
      */
     private class TableDetectingStripper : com.tom_roush.pdfbox.text.PDFTextStripper() {
@@ -244,20 +500,38 @@ class TableExtractor {
         val rawText: String,
         val rowCount: Int,
         val columnCount: Int,
-        val caption: String? = null
+        val caption: String? = null,
+        val confidence: Float = 0.7f  // Confidence score (0-1)
     ) {
         fun toChunkText(): String {
+            val tableType = if (confidence >= 0.9f) "Bordered Table" else "Space-Aligned Table"
             val captionText = if (!caption.isNullOrBlank()) {
                 "**$caption**\n\n"
             } else {
-                "**Table from Page $pageNumber** (${rowCount}x$columnCount)\n\n"
+                "**Table from Page $pageNumber**\n\n"
             }
             
             return """
-                |$captionText$markdown
+                |📊 **STRUCTURED TABLE DATA** 📊
+                |
+                |$captionText**Type:** $tableType
+                |**Dimensions:** ${rowCount} rows × $columnCount columns
+                |**Page:** $pageNumber
+                |**Confidence:** ${String.format("%.0f%%", confidence * 100)}
+                |
+                |⚠️ **IMPORTANT:** This is a TABLE with structured data. Read carefully:
+                |• Each row represents a separate entry
+                |• Each column represents a specific category/metric
+                |• Numbers in cells are exact values, not approximations
+                |• Column headers define what each column contains
+                |• Do NOT confuse row labels with column labels
+                |
+                |**TABLE CONTENT:**
+                |
+                |$markdown
                 |
                 |---
-                |*Source: Page $pageNumber | ${rowCount} rows × $columnCount columns*
+                |*Table Source: Page $pageNumber | ${rowCount} rows × $columnCount columns*
                 |
             """.trimMargin()
         }

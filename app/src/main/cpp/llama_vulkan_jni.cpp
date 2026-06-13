@@ -175,3 +175,27 @@ Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_clearChat(
     auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
     llamaVulkan->clearChat();
 }
+
+extern "C" JNIEXPORT jint JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_shiftContext(
+    JNIEnv* env, jobject thiz, jlong modelPtr, jint keepFirstN, jint removeNextN) {
+    
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    return llamaVulkan->shiftContext(keepFirstN, removeNextN);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_getMessageCount(
+    JNIEnv* env, jobject thiz, jlong modelPtr) {
+    
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    return llamaVulkan->getMessageCount();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_removeOldestMessages(
+    JNIEnv* env, jobject thiz, jlong modelPtr, jint count) {
+    
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    llamaVulkan->removeOldestMessages(count);
+}

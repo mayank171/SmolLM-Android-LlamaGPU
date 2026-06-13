@@ -203,54 +203,119 @@ void LlamaVulkan::startCompletion(const char* query) {
     _responseNumTokens = 0;
     addChatMessage(query, "user");
     
-    // Apply chat template
-    std::vector<common_chat_msg> messages;
-    for (const llama_chat_message& message : _messages) {
+    LOGi("=== START COMPLETION: _nCtxUsed = %d, _contextShifted = %s ===", 
+         _nCtxUsed, _contextShifted ? "true" : "false");
+    
+    size_t newTokensStart = 0;
+    size_t newTokensCount = 0;
+    
+    // FAST PATH: After context shift, only process the new query
+    if (_contextShifted) {
+        // _nCtxUsed already set correctly by shiftContext()
+        LOGi("Fast path after context shift: processing only new query");
+        LOGi("  _nCtxUsed before fast path: %d", _nCtxUsed);
+        
+        // Tokenize ONLY the new user message with chat template
+        std::vector<common_chat_msg> newMessages;
         common_chat_msg msg;
-        msg.role = message.role;
-        msg.content = message.content;
-        messages.push_back(msg);
-    }
-    common_chat_templates_inputs inputs;
-    inputs.use_jinja = true;
-    inputs.messages = messages;
-    auto templates = common_chat_templates_init(_model, _chatTemplate);
-    std::string prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
-    _promptTokens = common_tokenize(llama_model_get_vocab(_model), prompt, true, true);
+        msg.role = "user";
+        msg.content = query;
+        newMessages.push_back(msg);
+        
+        common_chat_templates_inputs inputs;
+        inputs.use_jinja = true;
+        inputs.messages = newMessages;
+        inputs.add_generation_prompt = true;  // Add assistant prompt
+        auto templates = common_chat_templates_init(_model, _chatTemplate);
+        std::string newPrompt = common_chat_templates_apply(templates.get(), inputs).prompt;
+        
+        // Tokenize only the new query
+        std::vector<llama_token> newTokens = common_tokenize(llama_model_get_vocab(_model), newPrompt, false, true);
+        
+        LOGi("  _cachedTokens.size() before append: %zu", _cachedTokens.size());
+        
+        // Append to cached tokens
+        _cachedTokens.insert(_cachedTokens.end(), newTokens.begin(), newTokens.end());
+        _promptTokens = newTokens;  // Only process these new tokens
+        
+        newTokensStart = 0;
+        newTokensCount = newTokens.size();
+        
+        LOGi("  _cachedTokens.size() after append: %zu", _cachedTokens.size());
+        LOGi("  Context shift fast path: processing %zu new tokens only", newTokensCount);
+        LOGi("  _nCtxUsed after fast path (unchanged): %d", _nCtxUsed);
+        
+        // Clear the flag for next time
+        _contextShifted = false;
+        
+    } else {
+        // NORMAL PATH: Full prompt regeneration with caching
+        LOGi("Normal path: regenerating full prompt");
+        LOGi("  _nCtxUsed before normal path: %d", _nCtxUsed);
+        LOGi("  _cachedTokens.size(): %zu", _cachedTokens.size());
+        
+        // Apply chat template
+        std::vector<common_chat_msg> messages;
+        for (const llama_chat_message& message : _messages) {
+            common_chat_msg msg;
+            msg.role = message.role;
+            msg.content = message.content;
+            messages.push_back(msg);
+        }
+        common_chat_templates_inputs inputs;
+        inputs.use_jinja = true;
+        inputs.messages = messages;
+        auto templates = common_chat_templates_init(_model, _chatTemplate);
+        std::string prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
+        _promptTokens = common_tokenize(llama_model_get_vocab(_model), prompt, true, true);
+        
+        LOGi("  _promptTokens.size(): %zu", _promptTokens.size());
 
-    // PROMPT CACHING: Find how many tokens match the cached tokens
-    size_t commonPrefix = 0;
-    size_t minLen = std::min(_cachedTokens.size(), _promptTokens.size());
-    for (size_t i = 0; i < minLen; i++) {
-        if (_cachedTokens[i] == _promptTokens[i]) {
-            commonPrefix++;
+        // PROMPT CACHING: Find how many tokens match the cached tokens
+        size_t commonPrefix = 0;
+        size_t minLen = std::min(_cachedTokens.size(), _promptTokens.size());
+        for (size_t i = 0; i < minLen; i++) {
+            if (_cachedTokens[i] == _promptTokens[i]) {
+                commonPrefix++;
+            } else {
+                break;
+            }
+        }
+        
+        // If cache diverged, we need to clear KV cache from that point
+        if (commonPrefix < _cachedTokens.size()) {
+            // Clear KV cache entries after the common prefix
+            llama_memory_t mem = llama_get_memory(_ctx);
+            if (mem && commonPrefix > 0) {
+                // Remove tokens from commonPrefix onwards
+                llama_memory_seq_rm(mem, 0, commonPrefix, -1);
+            } else if (mem && commonPrefix == 0) {
+                // Complete mismatch, clear everything
+                llama_memory_clear(mem, true);
+            }
+        }
+        
+        // Calculate how many NEW tokens to process
+        newTokensStart = commonPrefix;
+        newTokensCount = _promptTokens.size() - commonPrefix;
+        
+        LOGi("  commonPrefix: %zu, newTokensCount: %zu", commonPrefix, newTokensCount);
+        LOGi("  Prompt caching: %zu cached, %zu new tokens (total: %zu)", 
+             commonPrefix, newTokensCount, _promptTokens.size());
+        
+        // Update cached tokens for next time
+        _cachedTokens = _promptTokens;
+        
+        // Initialize _nCtxUsed on first query (when it's 0)
+        // Otherwise keep the current value (it's tracking correctly)
+        int oldNCtxUsed = _nCtxUsed;
+        if (_nCtxUsed == 0 && commonPrefix > 0) {
+            _nCtxUsed = commonPrefix;
+            LOGi("  Initialized _nCtxUsed: %d -> %d (first query with cache)", oldNCtxUsed, _nCtxUsed);
         } else {
-            break;
+            LOGi("  Keeping _nCtxUsed: %d (will add %zu new tokens in completionLoop)", _nCtxUsed, newTokensCount);
         }
     }
-    
-    // If cache diverged, we need to clear KV cache from that point
-    if (commonPrefix < _cachedTokens.size()) {
-        // Clear KV cache entries after the common prefix
-        llama_memory_t mem = llama_get_memory(_ctx);
-        if (mem && commonPrefix > 0) {
-            // Remove tokens from commonPrefix onwards
-            llama_memory_seq_rm(mem, 0, commonPrefix, -1);
-        } else if (mem && commonPrefix == 0) {
-            // Complete mismatch, clear everything
-            llama_memory_clear(mem, true);
-        }
-    }
-    
-    // Calculate how many NEW tokens to process
-    size_t newTokensStart = commonPrefix;
-    size_t newTokensCount = _promptTokens.size() - commonPrefix;
-    
-    LOGi("Prompt caching: %zu cached, %zu new tokens (total: %zu)", 
-         commonPrefix, newTokensCount, _promptTokens.size());
-    
-    // Update cached tokens for next time
-    _cachedTokens = _promptTokens;
     
     // Create batch with only NEW tokens
     _batch = new llama_batch();
@@ -292,14 +357,28 @@ bool LlamaVulkan::_isValidUtf8(const char* response) {
 
 std::string LlamaVulkan::completionLoop() {
     uint32_t contextSize = llama_n_ctx(_ctx);
-    _nCtxUsed = llama_memory_seq_pos_max(llama_get_memory(_ctx), 0) + 1;
-    if (_nCtxUsed + _batch->n_tokens > contextSize) {
+    
+    // Only increment context on first call (processing prompt) or when generating new tokens
+    // For prompt: _batch->n_tokens > 1, for generation: _batch->n_tokens == 1
+    int tokensToAdd = _batch->n_tokens;
+    int oldNCtxUsed = _nCtxUsed;
+    
+    if (_nCtxUsed + tokensToAdd > contextSize) {
         throw std::runtime_error("context size reached");
     }
 
     auto start = ggml_time_us();
     if (llama_decode(_ctx, *_batch) < 0) {
         throw std::runtime_error("llama_decode() failed");
+    }
+    
+    // Increment context usage after successful decode
+    _nCtxUsed += tokensToAdd;
+    
+    if (tokensToAdd > 1) {
+        // Processing prompt batch
+        LOGi("completionLoop: processed %d prompt tokens, _nCtxUsed: %d -> %d", 
+             tokensToAdd, oldNCtxUsed, _nCtxUsed);
     }
 
     _currToken = llama_sampler_sample(_sampler, _ctx, -1);
@@ -348,6 +427,12 @@ void LlamaVulkan::stopCompletion() {
         _cachedTokens = common_tokenize(llama_model_get_vocab(_model), fullPrompt, true, true);
         
         LOGi("Updated prompt cache: %zu tokens", _cachedTokens.size());
+        
+        // Update _nCtxUsed to match the actual KV cache size
+        // This ensures accurate context tracking even when response is stopped midway
+        int oldNCtxUsed = _nCtxUsed;
+        _nCtxUsed = _cachedTokens.size();
+        LOGi("Updated _nCtxUsed after stop: %d -> %d (synced with cache)", oldNCtxUsed, _nCtxUsed);
     }
     _response.clear();
 }
@@ -460,6 +545,83 @@ void LlamaVulkan::clearChat() {
     
     _nCtxUsed = 0;
     LOGi("Chat cleared");
+}
+
+int LlamaVulkan::shiftContext(int keepFirstN, int removeNextN) {
+    if (!_ctx) {
+        LOGe("Cannot shift context: context not initialized");
+        return -1;
+    }
+    
+    llama_memory_t mem = llama_get_memory(_ctx);
+    if (!mem) {
+        LOGe("Cannot shift context: memory not available");
+        return -1;
+    }
+    
+    int currentUsed = llama_memory_seq_pos_max(mem, 0) + 1;
+    LOGi("Context shift: current=%d, keepFirst=%d, removeNext=%d", 
+         currentUsed, keepFirstN, removeNextN);
+    
+    if (keepFirstN + removeNextN > currentUsed) {
+        LOGw("Shift request exceeds context size, adjusting");
+        removeNextN = currentUsed - keepFirstN;
+        if (removeNextN <= 0) {
+            LOGw("Nothing to remove");
+            return currentUsed;
+        }
+    }
+    
+    // Remove tokens from position keepFirstN to keepFirstN + removeNextN
+    // This preserves tokens 0 to keepFirstN-1 (e.g., system prompt)
+    // and shifts tokens after keepFirstN + removeNextN forward
+    bool success = llama_memory_seq_rm(mem, 0, keepFirstN, keepFirstN + removeNextN);
+    if (!success) {
+        LOGe("llama_memory_seq_rm failed");
+        return -1;
+    }
+    
+    // Update cached tokens to reflect the removal
+    // Keep tokens before keepFirstN and after (keepFirstN + removeNextN)
+    if (_cachedTokens.size() > (size_t)(keepFirstN + removeNextN)) {
+        // Erase the removed section
+        _cachedTokens.erase(
+            _cachedTokens.begin() + keepFirstN,
+            _cachedTokens.begin() + keepFirstN + removeNextN
+        );
+        LOGi("Updated cached tokens: %zu remaining", _cachedTokens.size());
+    } else {
+        // Can't update properly - keep what we have, incremental processing will handle it
+        LOGi("Keeping partial cached tokens: %zu (incremental processing will continue)", _cachedTokens.size());
+    }
+    
+    // Update context size - after removing tokens, the new size is reduced
+    _nCtxUsed = currentUsed - removeNextN;
+    
+    // Set flag to skip full prompt regeneration on next query
+    _contextShifted = true;
+    
+    LOGi("Context shifted successfully: now using %d tokens (freed %d)", 
+         _nCtxUsed, removeNextN);
+    
+    return _nCtxUsed;
+}
+
+void LlamaVulkan::removeOldestMessages(int count) {
+    if (count <= 0 || _messages.empty()) return;
+    
+    int toRemove = std::min(count, (int)_messages.size());
+    LOGi("Removing %d oldest messages from chat history", toRemove);
+    
+    // Free memory for messages being removed
+    for (int i = 0; i < toRemove; i++) {
+        free(const_cast<char*>(_messages[i].role));
+        free(const_cast<char*>(_messages[i].content));
+    }
+    
+    // Erase from vector
+    _messages.erase(_messages.begin(), _messages.begin() + toRemove);
+    LOGi("Chat history now has %zu messages", _messages.size());
 }
 
 LlamaVulkan::~LlamaVulkan() {

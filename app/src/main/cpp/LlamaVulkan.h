@@ -32,6 +32,7 @@ class LlamaVulkan {
     std::string _cacheResponseTokens;
     bool _storeChats = true;
     bool _useGPU = false;
+    bool _contextShifted = false;  // Flag to skip full prompt regen after shift
 
     int64_t _responseGenerationTime = 0;
     long    _responseNumTokens = 0;
@@ -69,6 +70,16 @@ public:
     bool saveState(const char* path);
     bool loadState(const char* path);
     void clearChat();
+    
+    // Context shifting - removes old tokens without model reload
+    // Returns new context size used, or -1 on error
+    int shiftContext(int keepFirstN, int removeNextN);
+    
+    // Get number of messages in chat history
+    int getMessageCount() const { return _messages.size(); }
+    
+    // Remove oldest N message pairs from internal message list
+    void removeOldestMessages(int count);
     
     // GPU-specific methods
     bool isUsingGPU() const { return _useGPU; }
