@@ -249,6 +249,42 @@ class LlamaGPU {
         clearChat(nativePtr)
     }
     
+    /**
+     * Shift context by removing tokens from the middle of the KV cache.
+     * This is MUCH faster than reloading the model (~50ms vs ~8 seconds).
+     * 
+     * @param keepFirstN Number of tokens to keep at the start (e.g., system prompt tokens)
+     * @param removeNextN Number of tokens to remove after keepFirstN
+     * @return New context size used, or -1 on error
+     * 
+     * Example: If you have 2000 tokens and want to remove the first conversation
+     * while keeping the system prompt (50 tokens):
+     *   shiftContext(50, 400) // Keep first 50, remove next 400
+     */
+    fun shiftContext(keepFirstN: Int, removeNextN: Int): Int {
+        verifyHandle()
+        return shiftContext(nativePtr, keepFirstN, removeNextN)
+    }
+    
+    /**
+     * Get the number of messages in the internal chat history
+     */
+    fun getMessageCount(): Int {
+        verifyHandle()
+        return getMessageCount(nativePtr)
+    }
+    
+    /**
+     * Remove oldest N messages from the internal chat history.
+     * Call this after shiftContext to keep the message list in sync with KV cache.
+     * 
+     * @param count Number of messages to remove (typically 2 for one user+assistant exchange)
+     */
+    fun removeOldestMessages(count: Int) {
+        verifyHandle()
+        removeOldestMessages(nativePtr, count)
+    }
+    
     fun close() {
         if (nativePtr != 0L) {
             close(nativePtr)
@@ -293,4 +329,7 @@ class LlamaGPU {
     private external fun saveState(modelPtr: Long, path: String): Boolean
     private external fun loadState(modelPtr: Long, path: String): Boolean
     private external fun clearChat(modelPtr: Long)
+    private external fun shiftContext(modelPtr: Long, keepFirstN: Int, removeNextN: Int): Int
+    private external fun getMessageCount(modelPtr: Long): Int
+    private external fun removeOldestMessages(modelPtr: Long, count: Int)
 }

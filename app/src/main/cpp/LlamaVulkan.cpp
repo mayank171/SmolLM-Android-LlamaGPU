@@ -462,6 +462,77 @@ void LlamaVulkan::clearChat() {
     LOGi("Chat cleared");
 }
 
+int LlamaVulkan::shiftContext(int keepFirstN, int removeNextN) {
+    if (!_ctx) {
+        LOGe("Cannot shift context: context not initialized");
+        return -1;
+    }
+    
+    llama_memory_t mem = llama_get_memory(_ctx);
+    if (!mem) {
+        LOGe("Cannot shift context: memory not available");
+        return -1;
+    }
+    
+    int currentUsed = llama_memory_seq_pos_max(mem, 0) + 1;
+    LOGi("Context shift: current=%d, keepFirst=%d, removeNext=%d", 
+         currentUsed, keepFirstN, removeNextN);
+    
+    if (keepFirstN + removeNextN > currentUsed) {
+        LOGw("Shift request exceeds context size, adjusting");
+        removeNextN = currentUsed - keepFirstN;
+        if (removeNextN <= 0) {
+            LOGw("Nothing to remove");
+            return currentUsed;
+        }
+    }
+    
+    // Remove tokens from position keepFirstN to keepFirstN + removeNextN
+    // This preserves tokens 0 to keepFirstN-1 (e.g., system prompt)
+    // and shifts tokens after keepFirstN + removeNextN forward
+    bool success = llama_memory_seq_rm(mem, 0, keepFirstN, keepFirstN + removeNextN);
+    if (!success) {
+        LOGe("llama_memory_seq_rm failed");
+        return -1;
+    }
+    
+    // Update cached tokens to reflect the removal
+    if (_cachedTokens.size() > (size_t)(keepFirstN + removeNextN)) {
+        _cachedTokens.erase(
+            _cachedTokens.begin() + keepFirstN,
+            _cachedTokens.begin() + keepFirstN + removeNextN
+        );
+        LOGi("Updated cached tokens: %zu remaining", _cachedTokens.size());
+    } else {
+        // If we can't properly update cache, clear it to force re-tokenization
+        _cachedTokens.clear();
+        LOGi("Cleared cached tokens (will re-tokenize on next query)");
+    }
+    
+    _nCtxUsed = llama_memory_seq_pos_max(mem, 0) + 1;
+    LOGi("Context shifted successfully: now using %d tokens (freed %d)", 
+         _nCtxUsed, removeNextN);
+    
+    return _nCtxUsed;
+}
+
+void LlamaVulkan::removeOldestMessages(int count) {
+    if (count <= 0 || _messages.empty()) return;
+    
+    int toRemove = std::min(count, (int)_messages.size());
+    LOGi("Removing %d oldest messages from chat history", toRemove);
+    
+    // Free memory for messages being removed
+    for (int i = 0; i < toRemove; i++) {
+        free(const_cast<char*>(_messages[i].role));
+        free(const_cast<char*>(_messages[i].content));
+    }
+    
+    // Erase from vector
+    _messages.erase(_messages.begin(), _messages.begin() + toRemove);
+    LOGi("Chat history now has %zu messages", _messages.size());
+}
+
 LlamaVulkan::~LlamaVulkan() {
     for (llama_chat_message& message : _messages) {
         free(const_cast<char*>(message.role));

@@ -908,10 +908,64 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         val currentMessages = _appStateFlow.value.chatState.messages
         if (currentMessages.size <= 2) return // Keep at least 1 exchange
         
-        // Remove oldest 2 messages (1 user + 1 assistant exchange)
-        val trimmedMessages = currentMessages.drop(2).toImmutableList()
+        val startTime = System.currentTimeMillis()
         
-        // Recalculate token count from remaining messages
+        // Calculate how many message pairs to remove to get to ~40% context
+        // This gives headroom before next trim is needed
+        val currentTokens = getRealContextUsage()
+        val targetTokens = (maxContextSize * 0.40).toInt()
+        val tokensToRemove = currentTokens - targetTokens
+        
+        // Estimate tokens per message pair and calculate how many pairs to remove
+        val avgTokensPerMessage = if (currentMessages.isNotEmpty()) {
+            currentTokens / currentMessages.size
+        } else 100
+        
+        // Remove enough message pairs to reach target (minimum 2 messages = 1 exchange)
+        val messagesToRemove = ((tokensToRemove / avgTokensPerMessage) + 1).coerceIn(2, currentMessages.size - 2)
+        // Ensure we remove in pairs (user + assistant)
+        val pairsToRemove = (messagesToRemove / 2).coerceAtLeast(1)
+        val actualMessagesToRemove = pairsToRemove * 2
+        
+        android.util.Log.d("SmolLM", "Context shift: removing $actualMessagesToRemove messages ($pairsToRemove exchanges)")
+        android.util.Log.d("SmolLM", "Current: $currentTokens tokens, target: $targetTokens tokens")
+        
+        // Calculate tokens to remove from KV cache
+        // System prompt is ~50 tokens, keep it intact
+        val systemPromptTokens = 50
+        val tokensForRemovedMessages = currentMessages.take(actualMessagesToRemove)
+            .sumOf { estimateTokens(it.content) }
+        
+        // Use fast context shifting instead of model reload!
+        // This removes tokens from KV cache without reloading the model
+        withContext(Dispatchers.IO) {
+            try {
+                val newContextSize = llamaGPU.shiftContext(
+                    keepFirstN = systemPromptTokens,
+                    removeNextN = tokensForRemovedMessages
+                )
+                
+                if (newContextSize >= 0) {
+                    // Also remove from llama.cpp's internal message list
+                    llamaGPU.removeOldestMessages(actualMessagesToRemove)
+                    
+                    val shiftTime = System.currentTimeMillis() - startTime
+                    android.util.Log.d("SmolLM", "Context shift completed in ${shiftTime}ms (vs ~8000ms for reload)")
+                    android.util.Log.d("SmolLM", "New context size: $newContextSize tokens")
+                } else {
+                    android.util.Log.e("SmolLM", "Context shift failed, falling back to clear")
+                    // Fallback: clear everything if shift fails
+                    llamaGPU.clearChat()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SmolLM", "Error during context shift: ${e.message}")
+                // Fallback: clear everything
+                llamaGPU.clearChat()
+            }
+        }
+        
+        // Update UI message list
+        val trimmedMessages = currentMessages.drop(actualMessagesToRemove).toImmutableList()
         estimatedTokenCount = 50 + trimmedMessages.sumOf { estimateTokens(it.content) }
         
         withContext(Dispatchers.Main) {
@@ -925,58 +979,9 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             }
         }
         
-        // CRITICAL: Reload model to clear llama.cpp internal KV cache
-        // This is the only way to actually free the context memory
-        currentModel?.let { model ->
-            withContext(Dispatchers.IO) {
-                try {
-                    android.util.Log.d("SmolLM", "Reloading model to clear context...")
-                    
-                    val reader = GGUFReader()
-                    reader.load(currentModelPath)
-                    val chatTemplate = reader.getChatTemplate()
-                    val deviceOptimalContext = DeviceCapabilities.getContextSizeForModel(model, deviceProfile)
-                    val safeContextSize = minOf(model.maxContextSize.toLong(), deviceOptimalContext.toLong())
-                    
-                    llamaGPU.load(
-                        modelPath = currentModelPath,
-                        params = LlamaGPU.InferenceParams(
-                            minP = 0.05f,
-                            temperature = 0.7f,
-                            storeChats = model.supportsMultiTurn,
-                            contextSize = safeContextSize,
-                            chatTemplate = chatTemplate,
-                            numThreads = deviceProfile.optimalThreads,
-                            useMmap = true,
-                            useMlock = deviceProfile.deviceTier == DeviceTier.HIGH,
-                            // Performance optimizations
-                            flashAttention = true,
-                            kvCacheType = KVCacheType.Q8_0  // 50% memory savings!
-                        )
-                    )
-                    
-                    // Re-add system prompt for non-Gemma models
-                    if (!model.id.contains("gemma")) {
-                        llamaGPU.addSystemPrompt("You are a helpful and intelligent AI assistant. Answer questions clearly and concisely.")
-                    }
-                    
-                    // Re-add the last exchange to maintain some context continuity
-                    // This helps the model understand the conversation flow
-                    if (trimmedMessages.size >= 2) {
-                        val lastUserMsg = trimmedMessages.lastOrNull { it.userRole == UserRole.HUMAN }
-                        val lastAssistantMsg = trimmedMessages.lastOrNull { it.userRole == UserRole.LLM }
-                        
-                        lastUserMsg?.let { llamaGPU.addUserMessage(it.content) }
-                        lastAssistantMsg?.let { llamaGPU.addAssistantMessage(it.content) }
-                    }
-                    
-                    val newUsage = calculateContextUsage()
-                    android.util.Log.d("SmolLM", "Model reloaded, context now at $newUsage%")
-                } catch (e: Exception) {
-                    android.util.Log.e("SmolLM", "Error reloading model: ${e.message}")
-                }
-            }
-        }
+        val totalTime = System.currentTimeMillis() - startTime
+        val newUsage = calculateContextUsage()
+        android.util.Log.d("SmolLM", "Trim complete in ${totalTime}ms, context now at $newUsage%")
     }
 
     private fun loadModel(model: ModelInfo) {
@@ -1036,6 +1041,10 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 android.util.Log.d("SmolLM-8K-TEST", "RAM after load: ${ramAfterLoadMB}MB (+${ramIncreaseMB}MB)")
                 android.util.Log.d("SmolLM-8K-TEST", "Context size: $safeContextSize tokens")
                 android.util.Log.d("SmolLM-8K-TEST", "Estimated KV cache: ~${(safeContextSize * 0.054).toInt()}MB (Q8_0)")
+                
+                // Update RAG configuration based on loaded model
+                ragEngine.updateModelConfig(model.parameters, safeContextSize.toInt())
+                android.util.Log.d("SmolLM", "RAG config updated for ${model.parameters} model")
                 
                 withContext(Dispatchers.Main) {
                     _appStateFlow.update { state ->
