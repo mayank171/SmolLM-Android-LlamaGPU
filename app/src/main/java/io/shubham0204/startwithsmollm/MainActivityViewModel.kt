@@ -927,14 +927,33 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         val pairsToRemove = (messagesToRemove / 2).coerceAtLeast(1)
         val actualMessagesToRemove = pairsToRemove * 2
         
-        android.util.Log.d("SmolLM", "Context shift: removing $actualMessagesToRemove messages ($pairsToRemove exchanges)")
-        android.util.Log.d("SmolLM", "Current: $currentTokens tokens, target: $targetTokens tokens")
+        android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
+        android.util.Log.d("SmolLM", "║           🗑️  CONTEXT TRIMMING STARTED                        ║")
+        android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
+        android.util.Log.d("SmolLM", "Total messages before trim: ${currentMessages.size}")
+        android.util.Log.d("SmolLM", "Messages to remove: $actualMessagesToRemove ($pairsToRemove exchanges)")
+        android.util.Log.d("SmolLM", "Current tokens: $currentTokens, Target tokens: $targetTokens")
+        android.util.Log.d("SmolLM", "")
+        
+        // Log the messages that will be removed
+        val messagesToBeRemoved = currentMessages.take(actualMessagesToRemove)
+        android.util.Log.d("SmolLM", "📋 MESSAGES BEING REMOVED:")
+        android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
+        messagesToBeRemoved.forEachIndexed { index, message ->
+            val role = if (message.userRole == UserRole.HUMAN) "👤 USER" else "🤖 ASSISTANT"
+            val preview = message.content.take(100).replace("\n", " ")
+            val suffix = if (message.content.length > 100) "..." else ""
+            val tokens = estimateTokens(message.content)
+            android.util.Log.d("SmolLM", "[$index] $role (~$tokens tokens)")
+            android.util.Log.d("SmolLM", "    \"$preview$suffix\"")
+        }
+        android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
+        android.util.Log.d("SmolLM", "")
         
         // Calculate tokens to remove from KV cache
         // System prompt is ~50 tokens, keep it intact
         val systemPromptTokens = 50
-        val tokensForRemovedMessages = currentMessages.take(actualMessagesToRemove)
-            .sumOf { estimateTokens(it.content) }
+        val tokensForRemovedMessages = messagesToBeRemoved.sumOf { estimateTokens(it.content) }
         
         // Use fast context shifting instead of model reload!
         // This removes tokens from KV cache without reloading the model
@@ -968,6 +987,18 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         val trimmedMessages = currentMessages.drop(actualMessagesToRemove).toImmutableList()
         estimatedTokenCount = 50 + trimmedMessages.sumOf { estimateTokens(it.content) }
         
+        android.util.Log.d("SmolLM", "📋 MESSAGES REMAINING (${trimmedMessages.size} total):")
+        android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
+        trimmedMessages.forEachIndexed { index, message ->
+            val role = if (message.userRole == UserRole.HUMAN) "👤 USER" else "🤖 ASSISTANT"
+            val preview = message.content.take(80).replace("\n", " ")
+            val suffix = if (message.content.length > 80) "..." else ""
+            val tokens = estimateTokens(message.content)
+            android.util.Log.d("SmolLM", "[$index] $role (~$tokens tokens): \"$preview$suffix\"")
+        }
+        android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
+        android.util.Log.d("SmolLM", "")
+        
         withContext(Dispatchers.Main) {
             _appStateFlow.update { state ->
                 state.copy(
@@ -981,7 +1012,14 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         
         val totalTime = System.currentTimeMillis() - startTime
         val newUsage = calculateContextUsage()
-        android.util.Log.d("SmolLM", "Trim complete in ${totalTime}ms, context now at $newUsage%")
+        android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
+        android.util.Log.d("SmolLM", "║           ✅ CONTEXT TRIMMING COMPLETE                        ║")
+        android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
+        android.util.Log.d("SmolLM", "⏱️  Time taken: ${totalTime}ms (vs ~8000ms for full reload)")
+        android.util.Log.d("SmolLM", "📊 Messages: ${currentMessages.size} → ${trimmedMessages.size} (removed $actualMessagesToRemove)")
+        android.util.Log.d("SmolLM", "🎯 Context usage: ${(currentTokens.toFloat() / maxContextSize * 100).toInt()}% → $newUsage%")
+        android.util.Log.d("SmolLM", "💾 Tokens: $currentTokens → ${getRealContextUsage()} (freed ${currentTokens - getRealContextUsage()} tokens)")
+        android.util.Log.d("SmolLM", "")
     }
 
     private fun loadModel(model: ModelInfo) {
@@ -1041,10 +1079,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 android.util.Log.d("SmolLM-8K-TEST", "RAM after load: ${ramAfterLoadMB}MB (+${ramIncreaseMB}MB)")
                 android.util.Log.d("SmolLM-8K-TEST", "Context size: $safeContextSize tokens")
                 android.util.Log.d("SmolLM-8K-TEST", "Estimated KV cache: ~${(safeContextSize * 0.054).toInt()}MB (Q8_0)")
-                
-                // Update RAG configuration based on loaded model
-                ragEngine.updateModelConfig(model.parameters, safeContextSize.toInt())
-                android.util.Log.d("SmolLM", "RAG config updated for ${model.parameters} model")
                 
                 withContext(Dispatchers.Main) {
                     _appStateFlow.update { state ->

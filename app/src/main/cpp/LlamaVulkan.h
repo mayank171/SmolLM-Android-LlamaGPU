@@ -32,6 +32,7 @@ class LlamaVulkan {
     std::string _cacheResponseTokens;
     bool _storeChats = true;
     bool _useGPU = false;
+    bool _contextShifted = false;  // Flag to skip full prompt regen after shift
 
     int64_t _responseGenerationTime = 0;
     long    _responseNumTokens = 0;
