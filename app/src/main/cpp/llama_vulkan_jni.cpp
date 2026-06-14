@@ -199,3 +199,22 @@ Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_removeOldestMessages(
     auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
     llamaVulkan->removeOldestMessages(count);
 }
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_summarizeMessages(
+    JNIEnv* env, jobject thiz, jlong modelPtr, jint startIdx, jint count) {
+    
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    std::string summary = llamaVulkan->summarizeMessages(startIdx, count);
+    return env->NewStringUTF(summary.c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_rebuildCacheWithSummary(
+    JNIEnv* env, jobject thiz, jlong modelPtr, jstring summary, jint keepRecentN) {
+    
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    const char* summaryStr = env->GetStringUTFChars(summary, nullptr);
+    llamaVulkan->rebuildCacheWithSummary(summaryStr, keepRecentN);
+    env->ReleaseStringUTFChars(summary, summaryStr);
+}

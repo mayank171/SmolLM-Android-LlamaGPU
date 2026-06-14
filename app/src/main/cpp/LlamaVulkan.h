@@ -75,6 +75,10 @@ public:
     // Returns new context size used, or -1 on error
     int shiftContext(int keepFirstN, int removeNextN);
     
+    // Background summarization - compress old messages
+    std::string summarizeMessages(int startIdx, int count);
+    void rebuildCacheWithSummary(const char* summary, int keepRecentN);
+    
     // Get number of messages in chat history
     int getMessageCount() const { return _messages.size(); }
     
