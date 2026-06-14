@@ -152,22 +152,13 @@ void LlamaVulkan::rebuildCacheWithSummary(const char* summary, int keepRecentN) 
     
     LOGi("Rebuilding KV cache with %zu tokens", _cachedTokens.size());
     
-    // Process all tokens to rebuild KV cache
-    llama_batch* rebuildBatch = new llama_batch();
-    rebuildBatch->token = _cachedTokens.data();
-    rebuildBatch->n_tokens = _cachedTokens.size();
-    rebuildBatch->pos = nullptr;
-    rebuildBatch->n_seq_id = nullptr;
-    rebuildBatch->seq_id = nullptr;
-    rebuildBatch->logits = nullptr;
+    // Process all tokens to rebuild KV cache using proper batch helper
+    llama_batch rebuildBatch = llama_batch_get_one(_cachedTokens.data(), _cachedTokens.size());
     
-    if (llama_decode(_ctx, *rebuildBatch) < 0) {
+    if (llama_decode(_ctx, rebuildBatch) < 0) {
         LOGe("Failed to rebuild KV cache");
-        delete rebuildBatch;
         return;
     }
-    
-    delete rebuildBatch;
     
     // Update context usage
     _nCtxUsed = _cachedTokens.size();

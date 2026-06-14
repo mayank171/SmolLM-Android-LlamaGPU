@@ -127,11 +127,13 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     val appStateFlow: StateFlow<AppState> = _appStateFlow
 
     private val llamaGPU = LlamaGPU()
+    private var summarizerGPU: LlamaGPU? = null  // Secondary tiny model for summarization
     private val ragEngine = RagEngine(application)
     private val voiceManager = VoiceManager(application)
     private val profiler = if (Profiler.isInitialized()) Profiler.getInstance(application) else null
     private var currentModelPath: String = ""
     private var currentModel: ModelInfo? = null
+    private var useDualModelSummarization = false  // True for models >1GB
     private var downloadJob: Job? = null
     private var inferenceJob: Job? = null
     private var estimatedTokenCount: Int = 0
@@ -143,10 +145,13 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     
     // Mutex to prevent concurrent access to llama context
     private val llamaMutex = Mutex()
+    private val summarizerMutex = Mutex()  // Separate mutex for summarizer model
     
-    // Background summarization - uses main model with tryLock
+    // Background summarization - uses main model with tryLock OR dedicated summarizer
     private val summaryBuffer = mutableListOf<String>() // Stores incremental summaries
     private var isBackgroundSummarizing = false
+    private val pendingSummarizationQueue = mutableListOf<Pair<String, String>>() // Queue of (userMsg, llmMsg) to summarize
+    private var pendingKVRebuild: Pair<String, Int>? = null // (summary, recentMessagesToKeep) - deferred rebuild
     
     // Expert mode - inference insights
     val isExpertMode = ExpertMode.isExpertMode
@@ -164,6 +169,15 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         logDeviceInfo()
         initializeRag()
         initializeVoice()
+    }
+    
+    override fun onCleared() {
+        super.onCleared()
+        // Cleanup summarizer model if loaded
+        summarizerGPU?.let {
+            android.util.Log.d("SmolLM", "🧹 Cleaning up summarizer model...")
+            // LlamaGPU cleanup happens automatically
+        }
     }
     
     private fun initializeVoice() {
@@ -262,6 +276,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     
     private fun clearChat() {
         estimatedTokenCount = 50 // Reset to system prompt size
+        // Reset ALL summarization state so old session summaries don't leak into new chat
+        resetSummarizationState()
         _appStateFlow.update { state ->
             state.copy(
                 chatState = state.chatState.copy(
@@ -272,6 +288,14 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         }
         // Reload model to clear internal chat history
         currentModel?.let { loadModel(it) }
+    }
+
+    private fun resetSummarizationState() {
+        currentSummary = ""
+        summaryBuffer.clear()
+        synchronized(pendingSummarizationQueue) { pendingSummarizationQueue.clear() }
+        pendingKVRebuild = null
+        android.util.Log.d("SmolLM", "🧹 Cleared all summarization state (summary, buffer, queue, pending rebuild)")
     }
     
     private fun calculateContextUsage(): Int {
@@ -502,6 +526,9 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private fun startChat(model: ModelInfo) {
         currentModelPath = downloadManager.getModelPath(model.fileName)
         currentModel = model
+        // Fresh session: clear any leftover summary state from a previous model/session
+        resetSummarizationState()
+        estimatedTokenCount = 50
         _appStateFlow.update { state ->
             state.copy(
                 currentScreen = AppScreen.CHAT,
@@ -713,22 +740,34 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         
         inferenceJob = viewModelScope.launch(Dispatchers.Default) {
             try {
+                val queryStartTime = System.currentTimeMillis()
+                android.util.Log.d("SmolLM", "")
+                android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
+                android.util.Log.d("SmolLM", "║           🚀 QUERY PROCESSING STARTED                         ║")
+                android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
+                
                 // Check REAL context usage from llama.cpp - trim at 70% to leave room for response
                 val realUsage = calculateContextUsage()
                 val currentMessages = _appStateFlow.value.chatState.messages
                 
-                android.util.Log.d("SmolLM", "Context before query: $realUsage% (${getRealContextUsage()}/${maxContextSize} tokens)")
+                android.util.Log.d("SmolLM", "📊 Context before query: $realUsage% (${getRealContextUsage()}/${maxContextSize} tokens)")
+                android.util.Log.d("SmolLM", "📝 Total messages: ${currentMessages.size}")
+                android.util.Log.d("SmolLM", "🔒 Mutex status: ${if (llamaMutex.isLocked) "LOCKED (summarization in progress?)" else "UNLOCKED"}")
                 
                 // Check if RAG is enabled and use augmented prompt
+                val ragStartTime = System.currentTimeMillis()
                 val ragEnabled = _appStateFlow.value.chatState.ragEnabled
                 var citations: List<io.shubham0204.startwithsmollm.rag.Citation> = emptyList()
                 
                 val finalQuery = if (ragEnabled && ragEngine.hasDocuments()) {
+                    android.util.Log.d("SmolLM", "🔍 RAG retrieval starting...")
                     val ragResult = ragEngine.query(query)
-                    android.util.Log.d("SmolLM", "RAG: Found ${ragResult.retrievedChunks.size} relevant chunks")
+                    val ragTime = System.currentTimeMillis() - ragStartTime
+                    android.util.Log.d("SmolLM", "✅ RAG: Found ${ragResult.retrievedChunks.size} relevant chunks in ${ragTime}ms")
                     citations = ragResult.citations
                     ragResult.augmentedPrompt
                 } else {
+                    android.util.Log.d("SmolLM", "⏭️ RAG disabled or no documents")
                     query
                 }
                 
@@ -765,15 +804,45 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 val inferenceStart = System.currentTimeMillis()
                 lastTokenTime = inferenceStart
                 
+                val preInferenceTime = inferenceStart - queryStartTime
+                android.util.Log.d("SmolLM", "⏱️ Pre-inference overhead: ${preInferenceTime}ms (RAG + setup)")
+                android.util.Log.d("SmolLM", "")
+                
                 // Acquire mutex to prevent concurrent llama access (e.g., from summarization)
+                val mutexWaitStart = System.currentTimeMillis()
+                android.util.Log.d("SmolLM", "🔒 Waiting for mutex...")
                 llamaMutex.withLock {
-                    // Stream tokens one by one
-                    llamaGPU.getResponseAsFlow(finalQuery).collect { token ->
+                val mutexWaitTime = System.currentTimeMillis() - mutexWaitStart
+                if (mutexWaitTime > 100) {
+                    android.util.Log.d("SmolLM", "⚠️ Mutex wait time: ${mutexWaitTime}ms (background summarization was running!)")
+                } else {
+                    android.util.Log.d("SmolLM", "✅ Mutex acquired in ${mutexWaitTime}ms")
+                }
+                
+                // Execute pending KV rebuild if any (deferred from rolling summarization)
+                pendingKVRebuild?.let { (summary, recentMessagesToKeep) ->
+                    android.util.Log.d("SmolLM", "🔧 Executing deferred KV rebuild...")
+                    val rebuildStart = System.currentTimeMillis()
+                    llamaGPU.rebuildCacheWithSummary(summary, recentMessagesToKeep)
+                    val rebuildTime = System.currentTimeMillis() - rebuildStart
+                    android.util.Log.d("SmolLM", "✅ KV cache rebuilt in ${rebuildTime}ms")
+                    pendingKVRebuild = null
+                }
+                
+                android.util.Log.d("SmolLM", "🤖 Starting LLM inference...")
+                val llmStartTime = System.currentTimeMillis()
+                // Stream tokens one by one
+                llamaGPU.getResponseAsFlow(finalQuery).collect { token ->
                     val now = System.currentTimeMillis()
                     
                     // Track TTFT (Time To First Token)
                     if (ttft == null) {
-                        ttft = now - inferenceStart
+                        ttft = now - llmStartTime
+                        val totalTTFT = now - queryStartTime
+                        android.util.Log.d("SmolLM", "⚡ First token received!")
+                        android.util.Log.d("SmolLM", "   - Pure LLM TTFT: ${ttft}ms")
+                        android.util.Log.d("SmolLM", "   - Total TTFT (with overhead): ${totalTTFT}ms")
+                        android.util.Log.d("SmolLM", "   - Breakdown: Pre-inference=${preInferenceTime}ms, Mutex wait=${mutexWaitTime}ms, LLM=${ttft}ms")
                         profiler?.recordLatency("ttft", "LLM", ttft!!)
                     } else {
                         // Track ITL (Inter-Token Latency)
@@ -802,10 +871,13 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                             )
                         }
                     }
-                    }
+                }
                 } // End of llamaMutex.withLock
                 
                 val totalTime = System.currentTimeMillis() - inferenceStart
+                val totalQueryTime = System.currentTimeMillis() - queryStartTime
+                android.util.Log.d("SmolLM", "")
+                android.util.Log.d("SmolLM", "✅ Inference complete in ${totalTime}ms (total query time: ${totalQueryTime}ms)")
                 
                 // Track RAM after inference
                 val ramAfterMB = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
@@ -950,33 +1022,14 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         val pairsToRemove = (messagesToRemove / 2).coerceAtLeast(1)
         val actualMessagesToRemove = pairsToRemove * 2
         
-        android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
-        android.util.Log.d("SmolLM", "║           🗑️  CONTEXT TRIMMING STARTED                        ║")
-        android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
-        android.util.Log.d("SmolLM", "Total messages before trim: ${currentMessages.size}")
-        android.util.Log.d("SmolLM", "Messages to remove: $actualMessagesToRemove ($pairsToRemove exchanges)")
-        android.util.Log.d("SmolLM", "Current tokens: $currentTokens, Target tokens: $targetTokens")
-        android.util.Log.d("SmolLM", "")
-        
-        // Log the messages that will be removed
-        val messagesToBeRemoved = currentMessages.take(actualMessagesToRemove)
-        android.util.Log.d("SmolLM", "📋 MESSAGES BEING REMOVED:")
-        android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
-        messagesToBeRemoved.forEachIndexed { index, message ->
-            val role = if (message.userRole == UserRole.HUMAN) "👤 USER" else "🤖 ASSISTANT"
-            val preview = message.content.take(100).replace("\n", " ")
-            val suffix = if (message.content.length > 100) "..." else ""
-            val tokens = estimateTokens(message.content)
-            android.util.Log.d("SmolLM", "[$index] $role (~$tokens tokens)")
-            android.util.Log.d("SmolLM", "    \"$preview$suffix\"")
-        }
-        android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
-        android.util.Log.d("SmolLM", "")
+        android.util.Log.d("SmolLM", "Context shift: removing $actualMessagesToRemove messages ($pairsToRemove exchanges)")
+        android.util.Log.d("SmolLM", "Current: $currentTokens tokens, target: $targetTokens tokens")
         
         // Calculate tokens to remove from KV cache
         // System prompt is ~50 tokens, keep it intact
         val systemPromptTokens = 50
-        val tokensForRemovedMessages = messagesToBeRemoved.sumOf { estimateTokens(it.content) }
+        val tokensForRemovedMessages = currentMessages.take(actualMessagesToRemove)
+            .sumOf { estimateTokens(it.content) }
         
         // Use fast context shifting instead of model reload!
         // This removes tokens from KV cache without reloading the model
@@ -1010,18 +1063,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         val trimmedMessages = currentMessages.drop(actualMessagesToRemove).toImmutableList()
         estimatedTokenCount = 50 + trimmedMessages.sumOf { estimateTokens(it.content) }
         
-        android.util.Log.d("SmolLM", "📋 MESSAGES REMAINING (${trimmedMessages.size} total):")
-        android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
-        trimmedMessages.forEachIndexed { index, message ->
-            val role = if (message.userRole == UserRole.HUMAN) "👤 USER" else "🤖 ASSISTANT"
-            val preview = message.content.take(80).replace("\n", " ")
-            val suffix = if (message.content.length > 80) "..." else ""
-            val tokens = estimateTokens(message.content)
-            android.util.Log.d("SmolLM", "[$index] $role (~$tokens tokens): \"$preview$suffix\"")
-        }
-        android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
-        android.util.Log.d("SmolLM", "")
-        
         withContext(Dispatchers.Main) {
             _appStateFlow.update { state ->
                 state.copy(
@@ -1035,14 +1076,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         
         val totalTime = System.currentTimeMillis() - startTime
         val newUsage = calculateContextUsage()
-        android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
-        android.util.Log.d("SmolLM", "║           ✅ CONTEXT TRIMMING COMPLETE                        ║")
-        android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
-        android.util.Log.d("SmolLM", "⏱️  Time taken: ${totalTime}ms (vs ~8000ms for full reload)")
-        android.util.Log.d("SmolLM", "📊 Messages: ${currentMessages.size} → ${trimmedMessages.size} (removed $actualMessagesToRemove)")
-        android.util.Log.d("SmolLM", "🎯 Context usage: ${(currentTokens.toFloat() / maxContextSize * 100).toInt()}% → $newUsage%")
-        android.util.Log.d("SmolLM", "💾 Tokens: $currentTokens → ${getRealContextUsage()} (freed ${currentTokens - getRealContextUsage()} tokens)")
-        android.util.Log.d("SmolLM", "")
+        android.util.Log.d("SmolLM", "Trim complete in ${totalTime}ms, context now at $newUsage%")
     }
     
     private suspend fun summarizeOldMessagesInBackground() {
@@ -1067,13 +1101,13 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         val messagesToSummarize: Int
         
         if (summaryIndex >= 0) {
-            // We have a previous summary - summarize messages after it
+            // We have a previous summary - summarize ALL messages after it
             startIdx = summaryIndex + 1
-            messagesToSummarize = minOf(10, messages.size - startIdx - 5) // Keep at least 5 recent
+            messagesToSummarize = messages.size - startIdx // Keep 0 recent - summary has everything
         } else {
-            // First summarization - start from beginning
+            // First summarization - summarize ALL messages
             startIdx = 0
-            messagesToSummarize = minOf(10, messages.size - 5)
+            messagesToSummarize = messages.size // Keep 0 recent - summary has everything
         }
         
         if (messagesToSummarize < 2) {
@@ -1175,35 +1209,30 @@ Compressed summary:"""
             android.util.Log.d("SmolLM", "📚 Accumulated summary: $currentSummary")
             android.util.Log.d("SmolLM", "")
             
-            // Rebuild KV cache with accumulated summary (takes ~1-2 seconds)
-            android.util.Log.d("SmolLM", "🔧 Rebuilding KV cache with accumulated summary...")
-            val rebuildStartTime = System.currentTimeMillis()
-            withContext(Dispatchers.IO) {
-                llamaGPU.rebuildCacheWithSummary(currentSummary, recentMessagesToKeep)
-            }
-            
-            val rebuildTime = System.currentTimeMillis() - rebuildStartTime
-            android.util.Log.d("SmolLM", "✅ KV cache rebuilt in ${rebuildTime}ms")
+            // Store pending rebuild - will be done when user query comes in
+            // This avoids blocking the user while they're reading the response
+            pendingKVRebuild = Pair(currentSummary, recentMessagesToKeep)
+            android.util.Log.d("SmolLM", "📋 KV rebuild scheduled (will happen on next query)")
             android.util.Log.d("SmolLM", "")
             
-            // Update UI - replace old messages with accumulated summary
+            // UI: Keep all original messages visible to user + append summary marker at end
+            // Internal KV cache: Only system + summary (no old messages) - handled by rebuildCacheWithSummary
             val summaryMessage = ChatMessage(
-                content = "📝 Conversation summary:\n$currentSummary",
+                content = "📝 Conversation summary (model context compressed):\n$currentSummary",
                 userRole = UserRole.LLM
             )
             
-            val recentMessages = messages.takeLast(recentMessagesToKeep)
-            android.util.Log.d("SmolLM", "📋 RECENT MESSAGES BEING KEPT:")
-            android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
-            recentMessages.forEachIndexed { index, msg ->
-                val role = if (msg.userRole == UserRole.HUMAN) "👤 USER" else "🤖 ASSISTANT"
-                val preview = msg.content.take(80) + if (msg.content.length > 80) "..." else ""
-                android.util.Log.d("SmolLM", "[$index] $role: \"$preview\"")
+            // Remove any previous summary marker from UI to avoid duplicates
+            val messagesWithoutOldSummary = messages.filter { 
+                !(it.userRole == UserRole.LLM && it.content.startsWith("📝 Conversation summary"))
             }
-            android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
-            android.util.Log.d("SmolLM", "")
             
-            val newMessages = listOf(summaryMessage) + recentMessages
+            // UI shows: all original messages + new summary marker at the end
+            val newMessages = messagesWithoutOldSummary + summaryMessage
+            
+            android.util.Log.d("SmolLM", "📋 UI: Keeping all ${messagesWithoutOldSummary.size} original messages + summary marker")
+            android.util.Log.d("SmolLM", "📋 KV cache: Only summary (~${estimateTokens(currentSummary)} tokens)")
+            android.util.Log.d("SmolLM", "")
             
             withContext(Dispatchers.Main) {
                 _appStateFlow.update { state ->
@@ -1216,8 +1245,8 @@ Compressed summary:"""
                 }
             }
             
-            // Update token estimate
-            estimatedTokenCount = 50 + newMessages.sumOf { estimateTokens(it.content) }
+            // Update token estimate - only count what's actually in KV cache (system + summary)
+            estimatedTokenCount = 50 + estimateTokens(currentSummary)
             
             // Get updated context after rebuild
             val contextAfter = getRealContextUsage()
@@ -1227,13 +1256,11 @@ Compressed summary:"""
             val totalTime = System.currentTimeMillis() - startTime
             
             android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
-            android.util.Log.d("SmolLM", "║           ✅ ROLLING SUMMARIZATION COMPLETE                   ║")
+            android.util.Log.d("SmolLM", "║           ✅ ROLLING SUMMARIZATION PREPARED                   ║")
             android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
-            android.util.Log.d("SmolLM", "⏱️  Total time: ${totalTime}ms (summary: ${summaryTime}ms, rebuild: ${rebuildTime}ms)")
+            android.util.Log.d("SmolLM", "⏱️  Prep time: ${totalTime}ms (KV rebuild deferred to next query)")
             android.util.Log.d("SmolLM", "📊 Messages: $totalMessages → ${newMessages.size} (compressed $messagesToSummarize)")
-            android.util.Log.d("SmolLM", "📚 Summary length: ${currentSummary.length} chars")
-            android.util.Log.d("SmolLM", "🎯 Context: $contextPercentBefore% → $contextPercentAfter% (saved $tokensSaved tokens)")
-            android.util.Log.d("SmolLM", "💾 Tokens: $contextBefore → $contextAfter / $maxContextSize")
+            android.util.Log.d("SmolLM", "📚 Summary length: ${currentSummary.length} chars (~${estimateTokens(currentSummary)} tokens)")
             android.util.Log.d("SmolLM", "")
             
             } catch (e: Exception) {
@@ -1262,14 +1289,29 @@ Compressed summary:"""
     }
     
     private suspend fun summarizeLastExchange() {
-        if (isBackgroundSummarizing) return
-        
         val messages = _appStateFlow.value.chatState.messages
         if (messages.size < 2) return
         
-        // Get last user message and LLM response
         val lastLLMMessage = messages.lastOrNull { it.userRole == UserRole.LLM } ?: return
         val lastUserMessage = messages.dropLast(1).lastOrNull { it.userRole == UserRole.HUMAN } ?: return
+        
+        // Add to queue
+        synchronized(pendingSummarizationQueue) {
+            pendingSummarizationQueue.add(Pair(lastUserMessage.content, lastLLMMessage.content))
+            android.util.Log.d("SmolLM", "📝 Added exchange to summarization queue (queue size: ${pendingSummarizationQueue.size})")
+        }
+        
+        // If already summarizing, the queue will be processed
+        if (isBackgroundSummarizing) {
+            android.util.Log.d("SmolLM", "⏭️ Summarization in progress, exchange queued for later")
+            return
+        }
+        
+        // For dual-model setup, use dedicated summarizer (no mutex conflict!)
+        if (useDualModelSummarization && summarizerGPU != null) {
+            summarizeWithDedicatedModel()
+            return
+        }
         
         // Try to acquire lock - if user is querying, skip background summarization
         if (!llamaMutex.tryLock()) {
@@ -1279,34 +1321,64 @@ Compressed summary:"""
         
         try {
             isBackgroundSummarizing = true
-            android.util.Log.d("SmolLM", "")
-            android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
-            android.util.Log.d("SmolLM", "║     📝 BACKGROUND SUMMARIZATION (while user reads)           ║")
-            android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
-            android.util.Log.d("SmolLM", "Buffer size before: ${summaryBuffer.size} summaries")
-            val startTime = System.currentTimeMillis()
             
-            // Create summarization prompt
-            val prompt = """Summarize this conversation exchange in 1-2 sentences:
-User: ${lastUserMessage.content}
-Assistant: ${lastLLMMessage.content}
+            // Process all items in the queue (same as dual-model path)
+            while (true) {
+                val exchange = synchronized(pendingSummarizationQueue) {
+                    if (pendingSummarizationQueue.isEmpty()) null
+                    else pendingSummarizationQueue.removeAt(0)
+                } ?: break
+                
+                val (userContent, llmContent) = exchange
+                
+                android.util.Log.d("SmolLM", "")
+                android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
+                android.util.Log.d("SmolLM", "║     📝 BACKGROUND SUMMARIZATION (main model)                 ║")
+                android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
+                
+                val queueSize = synchronized(pendingSummarizationQueue) { pendingSummarizationQueue.size }
+                android.util.Log.d("SmolLM", "📋 Queue remaining: $queueSize exchanges")
+                android.util.Log.d("SmolLM", "📚 Buffer size before: ${summaryBuffer.size} summaries")
+                val startTime = System.currentTimeMillis()
+                
+                // Truncate long content to avoid huge summaries
+                val userPreview = userContent.take(200)
+                val llmPreview = llmContent.take(500)
+                
+                val prompt = """Write a ONE sentence summary (max 30 words) of this exchange:
+Q: $userPreview
+A: $llmPreview
 
-Summary:"""
-            
-            // Generate summary using main model
-            val summary = StringBuilder()
-            llamaGPU.getResponseAsFlow(prompt).collect { token ->
-                summary.append(token)
+One sentence summary:"""
+                
+                // Generate summary using main model with hard token limit
+                val summary = StringBuilder()
+                var tokenCount = 0
+                val maxTokens = 60 // Hard limit on output tokens
+                llamaGPU.getResponseAsFlow(prompt).collect { token ->
+                    if (tokenCount < maxTokens) {
+                        summary.append(token)
+                        tokenCount++
+                    }
+                }
+                
+                // Clean up and truncate
+                var summaryText = summary.toString().trim()
+                val firstPeriod = summaryText.indexOf('.')
+                if (firstPeriod > 20) {
+                    summaryText = summaryText.substring(0, firstPeriod + 1)
+                }
+                if (summaryText.length > 200) {
+                    summaryText = summaryText.take(200) + "..."
+                }
+                summaryBuffer.add(summaryText)
+                
+                val timeTaken = System.currentTimeMillis() - startTime
+                android.util.Log.d("SmolLM", "✅ Summary generated in ${timeTaken}ms (using main model)")
+                android.util.Log.d("SmolLM", "📝 Summary: $summaryText")
+                android.util.Log.d("SmolLM", "📚 Buffer size after: ${summaryBuffer.size} summaries")
+                android.util.Log.d("SmolLM", "")
             }
-            
-            val summaryText = summary.toString().trim()
-            summaryBuffer.add(summaryText)
-            
-            val timeTaken = System.currentTimeMillis() - startTime
-            android.util.Log.d("SmolLM", "✅ Summary generated in ${timeTaken}ms")
-            android.util.Log.d("SmolLM", "📝 Summary: $summaryText")
-            android.util.Log.d("SmolLM", "📚 Buffer size after: ${summaryBuffer.size} summaries (ready for 60% trigger)")
-            android.util.Log.d("SmolLM", "")
             
         } catch (e: Exception) {
             android.util.Log.e("SmolLM", "❌ Background summarization failed: ${e.message}", e)
@@ -1374,6 +1446,16 @@ Summary:"""
                 android.util.Log.d("SmolLM-8K-TEST", "Context size: $safeContextSize tokens")
                 android.util.Log.d("SmolLM-8K-TEST", "Estimated KV cache: ~${(safeContextSize * 0.054).toInt()}MB (Q8_0)")
                 
+                // Load secondary summarizer model for large models (>1GB)
+                val modelSizeMB = model.sizeInMB
+                if (modelSizeMB > 1000) {
+                    android.util.Log.d("SmolLM", "📦 Large model detected (${modelSizeMB}MB), loading secondary summarizer...")
+                    loadSummarizerModel()
+                } else {
+                    android.util.Log.d("SmolLM", "📦 Small model (${modelSizeMB}MB), using main model for summarization")
+                    useDualModelSummarization = false
+                }
+                
                 withContext(Dispatchers.Main) {
                     _appStateFlow.update { state ->
                         state.copy(
@@ -1393,6 +1475,148 @@ Summary:"""
                         )
                     }
                 }
+            }
+        }
+    }
+    
+    private suspend fun loadSummarizerModel() {
+        try {
+            // Find Qwen 2.5 0.5B Instruct model (smallest reliable INSTRUCT model - 491MB)
+            // Note: SmolLM 135M is a base model and crashes, SmolLM 360M requires auth
+            val summarizerModel = AvailableModels.models.find { 
+                it.id.contains("qwen2.5-0.5b", ignoreCase = true) 
+            }
+            
+            if (summarizerModel == null) {
+                android.util.Log.w("SmolLM", "⚠️ Qwen 2.5 0.5B not found in available models, using main model")
+                useDualModelSummarization = false
+                return
+            }
+            
+            val summarizerPath = File(File(getApplication<Application>().filesDir, "models"), summarizerModel.fileName).absolutePath
+            
+            // Check if Qwen 2.5 0.5B is already downloaded
+            if (!File(summarizerPath).exists()) {
+                android.util.Log.w("SmolLM", "⚠️ Qwen 2.5 0.5B Instruct not downloaded. Please download it from model selection for dual-model summarization.")
+                android.util.Log.w("SmolLM", "💡 Falling back to main model for summarization (may block queries)")
+                useDualModelSummarization = false
+                return
+            }
+            
+            android.util.Log.d("SmolLM", "🔧 Loading Qwen 2.5 0.5B Instruct summarizer model...")
+            
+            // Read chat template from GGUF (with fallback to empty)
+            val chatTemplate = try {
+                val reader = GGUFReader()
+                reader.load(summarizerPath)
+                reader.getChatTemplate()
+            } catch (e: Exception) {
+                android.util.Log.w("SmolLM", "Could not read chat template from Qwen 0.5B model, using empty template")
+                ""
+            }
+            
+            summarizerGPU = LlamaGPU()
+            summarizerGPU?.load(
+                modelPath = summarizerPath,
+                params = LlamaGPU.InferenceParams(
+                    minP = 0.05f,
+                    temperature = 0.7f,
+                    storeChats = true,  // Need this to avoid crash
+                    contextSize = 2048,  // Small context is enough
+                    chatTemplate = chatTemplate,
+                    numThreads = 2,  // Use fewer threads to not interfere with main model
+                    useMmap = true,
+                    useMlock = false,
+                    flashAttention = false,  // Not needed for small model
+                    kvCacheType = KVCacheType.F16  // Use F16 for tiny model
+                )
+            )
+            
+            useDualModelSummarization = true
+            android.util.Log.d("SmolLM", "✅ Summarizer model loaded successfully (dual-model mode enabled)")
+            android.util.Log.d("SmolLM", "💡 Main model will never be blocked by summarization!")
+            
+        } catch (e: Exception) {
+            android.util.Log.e("SmolLM", "❌ Failed to load summarizer model: ${e.message}", e)
+            summarizerGPU = null
+            useDualModelSummarization = false
+        }
+    }
+    
+    private suspend fun summarizeWithDedicatedModel() {
+        // Use separate mutex for summarizer to avoid any deadlock
+        summarizerMutex.withLock {
+            try {
+                isBackgroundSummarizing = true
+                
+                // Process all items in the queue
+                while (true) {
+                    val exchange = synchronized(pendingSummarizationQueue) {
+                        if (pendingSummarizationQueue.isEmpty()) null
+                        else pendingSummarizationQueue.removeAt(0)
+                    } ?: break
+                    
+                    val (userContent, llmContent) = exchange
+                    
+                    android.util.Log.d("SmolLM", "")
+                    android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
+                    android.util.Log.d("SmolLM", "║     📝 BACKGROUND SUMMARIZATION (Qwen 0.5B model)           ║")
+                    android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
+                    
+                    val queueSize = synchronized(pendingSummarizationQueue) { pendingSummarizationQueue.size }
+                    android.util.Log.d("SmolLM", "📋 Queue remaining: $queueSize exchanges")
+                    android.util.Log.d("SmolLM", "📚 Buffer size before: ${summaryBuffer.size} summaries")
+                    val startTime = System.currentTimeMillis()
+                    
+                    // Create summarization prompt
+                    // Truncate long content to avoid huge summaries
+                    val userPreview = userContent.take(200)
+                    val llmPreview = llmContent.take(500)
+                    
+                    val prompt = """Write a ONE sentence summary (max 30 words) of this exchange:
+Q: $userPreview
+A: $llmPreview
+
+One sentence summary:"""
+                    
+                    // Generate summary using dedicated summarizer model (no mutex conflict!)
+                    val summary = StringBuilder()
+                    var tokenCount = 0
+                    val maxTokens = 60 // Hard limit on output tokens
+                    withContext(Dispatchers.IO) {
+                        summarizerGPU?.getResponseAsFlow(prompt)?.collect { token ->
+                            if (tokenCount < maxTokens) {
+                                summary.append(token)
+                                tokenCount++
+                            }
+                        }
+                    }
+                    
+                    // Clean up and truncate if needed
+                    var summaryText = summary.toString().trim()
+                    // Stop at first period if we have one
+                    val firstPeriod = summaryText.indexOf('.')
+                    if (firstPeriod > 20) {
+                        summaryText = summaryText.substring(0, firstPeriod + 1)
+                    }
+                    // Hard limit on characters
+                    if (summaryText.length > 200) {
+                        summaryText = summaryText.take(200) + "..."
+                    }
+                    summaryBuffer.add(summaryText)
+                    
+                    val timeTaken = System.currentTimeMillis() - startTime
+                    android.util.Log.d("SmolLM", "✅ Summary generated in ${timeTaken}ms (using Qwen 0.5B model)")
+                    android.util.Log.d("SmolLM", "📝 Summary: $summaryText")
+                    android.util.Log.d("SmolLM", "📚 Buffer size after: ${summaryBuffer.size} summaries")
+                    android.util.Log.d("SmolLM", "🎯 No mutex conflict - main model available for queries!")
+                    android.util.Log.d("SmolLM", "")
+                }
+                
+            } catch (e: Exception) {
+                android.util.Log.e("SmolLM", "❌ Dedicated summarization failed: ${e.message}", e)
+            } finally {
+                isBackgroundSummarizing = false
             }
         }
     }
