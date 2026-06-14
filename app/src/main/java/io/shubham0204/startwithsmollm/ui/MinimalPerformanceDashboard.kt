@@ -42,14 +42,20 @@ fun MinimalPerformanceDashboard(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Performance Metrics") },
+                title = {
+                    Text(
+                        "Performance Metrics",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                },
                 actions = {
                     IconButton(onClick = onDismiss) {
                         Icon(Icons.Default.Close, "Close")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                    containerColor = MaterialTheme.colorScheme.background,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
         }
@@ -281,15 +287,14 @@ fun MetricCard(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = when {
                 isHighlight -> MaterialTheme.colorScheme.primaryContainer
-                else -> MaterialTheme.colorScheme.surfaceVariant
+                else -> MaterialTheme.colorScheme.surfaceContainer
             }
         ),
-        elevation = CardDefaults.cardElevation(
-            defaultElevation = if (isHighlight) 4.dp else 1.dp
-        )
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(
             modifier = Modifier.padding(16.dp)
@@ -351,7 +356,7 @@ fun MetricCard(
 @Composable
 fun StatusBadge(status: MetricStatus) {
     Surface(
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(50),
         color = when (status) {
             MetricStatus.GOOD -> Color(0xFF4CAF50).copy(alpha = 0.2f)
             MetricStatus.ACCEPTABLE -> Color(0xFFFF9800).copy(alpha = 0.2f)

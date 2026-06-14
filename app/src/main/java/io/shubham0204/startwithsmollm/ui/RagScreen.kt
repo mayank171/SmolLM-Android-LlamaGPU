@@ -49,7 +49,12 @@ fun RagScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Knowledge Base") },
+                title = {
+                    Text(
+                        "Knowledge Base",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
@@ -61,7 +66,11 @@ fun RagScreen(
                             Icon(Icons.Default.DeleteSweep, "Delete All")
                         }
                     }
-                }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
             )
         },
         floatingActionButton = {
@@ -93,11 +102,13 @@ fun RagScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(16.dp),
+                shape = RoundedCornerShape(20.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (ragEnabled) 
-                        MaterialTheme.colorScheme.primaryContainer 
-                    else 
-                        MaterialTheme.colorScheme.surfaceVariant
+                    containerColor = if (ragEnabled)
+                        MaterialTheme.colorScheme.primaryContainer
+                    else
+                        MaterialTheme.colorScheme.surfaceContainer
                 )
             ) {
                 Row(
@@ -135,8 +146,10 @@ fun RagScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(20.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer
                 )
             ) {
                 Column(
@@ -339,27 +352,32 @@ private fun DocumentCard(
     val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()) }
     
     Card(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        )
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // Document type icon
             Box(
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(44.dp)
                     .background(
                         color = when (document.type) {
                             DocumentType.PDF -> MaterialTheme.colorScheme.errorContainer
                             DocumentType.TXT -> MaterialTheme.colorScheme.primaryContainer
                             DocumentType.MARKDOWN -> MaterialTheme.colorScheme.tertiaryContainer
                             DocumentType.IMAGE -> MaterialTheme.colorScheme.secondaryContainer
-                            DocumentType.UNKNOWN -> MaterialTheme.colorScheme.surfaceVariant
+                            DocumentType.UNKNOWN -> MaterialTheme.colorScheme.surfaceContainerHigh
                         },
-                        shape = RoundedCornerShape(8.dp)
+                        shape = RoundedCornerShape(12.dp)
                     ),
                 contentAlignment = Alignment.Center
             ) {

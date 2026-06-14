@@ -17,6 +17,17 @@ object AvailableModels {
     val models = listOf(
         // Ultra-Small Models (< 500MB) - Best for low-end devices
         ModelInfo(
+            id = "smollm-135m-q4_k_m",
+            name = "SmolLM 135M",
+            description = "Tiniest model. Perfect for background summarization.",
+            sizeInMB = 95,
+            downloadUrl = "https://huggingface.co/QuantFactory/SmolLM-135M-GGUF/resolve/main/SmolLM-135M.Q4_K_M.gguf",
+            fileName = "SmolLM-135M.Q4_K_M.gguf",
+            parameters = "135M",
+            quantization = "Q4_K_M",
+            maxContextSize = 2048
+        ),
+        ModelInfo(
             id = "smollm-360m-q4_0",
             name = "SmolLM 360M",
             description = "Smallest and fastest. Basic conversations only.",

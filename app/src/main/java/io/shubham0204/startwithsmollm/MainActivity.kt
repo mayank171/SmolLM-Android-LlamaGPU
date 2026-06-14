@@ -8,6 +8,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -437,7 +438,8 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface
+                        containerColor = MaterialTheme.colorScheme.background,
+                        titleContentColor = MaterialTheme.colorScheme.onSurface
                     )
                 )
             }
@@ -525,31 +527,31 @@ class MainActivity : ComponentActivity() {
             horizontalArrangement = if (isHuman) Arrangement.End else Arrangement.Start
         ) {
             if (isHuman) {
-                // User message - modern bubble with tail
+                // User message - modern bubble with tail (right-aligned)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(0.85f)
-                        .padding(start = 32.dp)
+                        .padding(start = 32.dp),
+                    contentAlignment = Alignment.CenterEnd
                 ) {
                     Surface(
                         shape = RoundedCornerShape(
-                            topStart = 20.dp,
-                            topEnd = 20.dp,
-                            bottomStart = 20.dp,
-                            bottomEnd = 4.dp
+                            topStart = 22.dp,
+                            topEnd = 22.dp,
+                            bottomStart = 22.dp,
+                            bottomEnd = 6.dp
                         ),
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        shadowElevation = 1.dp
+                        color = MaterialTheme.colorScheme.primary
                     ) {
                         Text(
                             text = message.content,
                             modifier = Modifier.padding(
-                                horizontal = 16.dp,
-                                vertical = 10.dp
+                                horizontal = 18.dp,
+                                vertical = 12.dp
                             ),
                             style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            lineHeight = 20.sp
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            lineHeight = 22.sp
                         )
                     }
                 }
@@ -567,9 +569,7 @@ class MainActivity : ComponentActivity() {
                             bottomStart = 20.dp,
                             bottomEnd = 20.dp
                         ),
-                        color = MaterialTheme.colorScheme.surface,
-                        shadowElevation = 2.dp,
-                        tonalElevation = 1.dp
+                        color = MaterialTheme.colorScheme.surfaceContainer
                     ) {
                         Column {
                             MarkdownText(
@@ -739,24 +739,18 @@ class MainActivity : ComponentActivity() {
                     bottomStart = 20.dp,
                     bottomEnd = 20.dp
                 ),
-                color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 2.dp,
-                tonalElevation = 1.dp
+                color = MaterialTheme.colorScheme.surfaceContainer
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.5.dp,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    AnimatedTypingDots()
                     Text(
-                        text = "Thinking...",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface
+                        text = "Thinking",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -792,8 +786,8 @@ class MainActivity : ComponentActivity() {
         
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 3.dp
+            color = MaterialTheme.colorScheme.background,
+            tonalElevation = 0.dp
         ) {
             Column {
                 // Voice status indicator
@@ -869,34 +863,50 @@ class MainActivity : ComponentActivity() {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.Bottom,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedTextField(
-                        value = queryText,
-                        onValueChange = { queryText = it },
+                    // Pill-shaped input: TextField in a Surface, no border
+                    Surface(
                         modifier = Modifier.weight(1f),
-                        enabled = modelLoadingState == ModelLoadingState.SUCCESS && 
-                                  !voiceState.isListening && 
-                                  modelInferenceState != ModelInferenceState.LOADING,
-                        placeholder = {
-                            Text(
-                                text = when {
-                                    modelInferenceState == ModelInferenceState.LOADING -> "Generating..."
-                                    voiceState.isListening -> "Listening..."
-                                    voiceState.isTranscribing -> "Processing..."
-                                    modelLoadingState == ModelLoadingState.LOADING -> "Loading model..."
-                                    modelLoadingState == ModelLoadingState.SUCCESS -> "Type or tap 🎤"
-                                    modelLoadingState == ModelLoadingState.FAILURE -> "Model failed to load"
-                                    else -> "Initializing..."
-                                }
-                            )
-                        },
-                        shape = RoundedCornerShape(24.dp),
-                        singleLine = false,
-                        maxLines = 4
-                    )
+                        shape = RoundedCornerShape(26.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        tonalElevation = 0.dp
+                    ) {
+                        androidx.compose.material3.TextField(
+                            value = queryText,
+                            onValueChange = { queryText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = modelLoadingState == ModelLoadingState.SUCCESS &&
+                                      !voiceState.isListening &&
+                                      modelInferenceState != ModelInferenceState.LOADING,
+                            placeholder = {
+                                Text(
+                                    text = when {
+                                        modelInferenceState == ModelInferenceState.LOADING -> "Generating…"
+                                        voiceState.isListening -> "Listening…"
+                                        voiceState.isTranscribing -> "Processing…"
+                                        modelLoadingState == ModelLoadingState.LOADING -> "Loading model…"
+                                        modelLoadingState == ModelLoadingState.SUCCESS -> "Message"
+                                        modelLoadingState == ModelLoadingState.FAILURE -> "Model failed to load"
+                                        else -> "Initializing…"
+                                    },
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            },
+                            colors = androidx.compose.material3.TextFieldDefaults.colors(
+                                focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                                unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                                disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                                focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                                unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                                disabledIndicatorColor = androidx.compose.ui.graphics.Color.Transparent
+                            ),
+                            singleLine = false,
+                            maxLines = 5
+                        )
+                    }
                     
                     when (modelLoadingState) {
                         ModelLoadingState.LOADING -> {
@@ -1001,6 +1011,40 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    @Composable
+    private fun AnimatedTypingDots() {
+        val infiniteTransition = androidx.compose.animation.core.rememberInfiniteTransition(label = "typing")
+        val dotColor = MaterialTheme.colorScheme.primary
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            repeat(3) { index ->
+                val alpha by infiniteTransition.animateFloat(
+                    initialValue = 0.25f,
+                    targetValue = 1f,
+                    animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                        animation = androidx.compose.animation.core.tween(
+                            durationMillis = 600,
+                            delayMillis = index * 150,
+                            easing = androidx.compose.animation.core.FastOutSlowInEasing
+                        ),
+                        repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+                    ),
+                    label = "dot$index"
+                )
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .background(
+                            color = dotColor.copy(alpha = alpha),
+                            shape = CircleShape
+                        )
+                )
             }
         }
     }

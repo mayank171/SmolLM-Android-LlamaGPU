@@ -66,25 +66,78 @@ data class ChunkSearchResult(
 
 /**
  * RAG configuration
- * Optimized for 4K token context window
+ * Adaptive settings based on model size
  */
 data class RagConfig(
     val chunkSize: Int = 768,           // Characters per chunk (~192 tokens) - balanced for quality & speed
     val chunkOverlap: Int = 150,        // ~20% overlap between chunks for better context continuity
-    val topK: Int = 7,                  // Default retrieve count (balanced for context)
-    val similarityThreshold: Float = 0.25f,  // Moderate threshold for quality candidates
+    val topK: Int = 7,                  // Retrieve 7 chunks for re-ranking (balanced for context)
+    val similarityThreshold: Float = 0.35f,  // Higher threshold = better quality chunks
     val embeddingDimension: Int = 384,  // all-MiniLM-L6-v2 dimension
     val enableReranking: Boolean = true,    // Re-rank retrieved chunks by relevance
-    val finalTopK: Int = 4,             // Default return count after re-ranking
-    
-    // Adaptive retrieval settings
-    val quickTopK: Int = 5,             // Initial quick retrieval
-    val simpleTopK: Int = 4,            // For high-confidence simple questions
-    val tableTopK: Int = 12,            // For questions with table content
-    val lowConfidenceTopK: Int = 10,    // For low-confidence queries
-    val highConfidenceThreshold: Float = 0.7f,   // Score above this = high confidence
-    val lowConfidenceThreshold: Float = 0.5f     // Score below this = low confidence
-)
+    val finalTopK: Int = 3              // Return top 3 after re-ranking - optimized for small models
+) {
+    companion object {
+        /**
+         * Get optimized RAG config based on model parameters
+         * @param modelParams Model size (e.g., "0.5B", "1.5B", "3B", "7B")
+         * @param contextSize Model's max context size
+         */
+        fun forModel(modelParams: String, contextSize: Int = 4096): RagConfig {
+            // Extract parameter count (e.g., "1.5B" -> 1.5)
+            val paramCount = modelParams.replace("B", "").replace("M", "").toFloatOrNull() ?: 0.5f
+            val isMillion = modelParams.contains("M")
+            val actualParams = if (isMillion) paramCount / 1000f else paramCount
+            
+            return when {
+                // Ultra-small models (< 1B): SmolLM 360M, Qwen 0.5B
+                actualParams < 1.0f -> RagConfig(
+                    chunkSize = 512,                    // Smaller chunks for limited capacity
+                    chunkOverlap = 100,
+                    topK = 5,                           // Fewer candidates
+                    similarityThreshold = 0.40f,        // Very strict - only best matches
+                    finalTopK = 2,                      // Only 2 chunks to avoid confusion
+                    enableReranking = true
+                )
+                
+                // Small models (1B - 2B): TinyLlama 1.1B, Qwen 1.5B, Gemma 2B
+                actualParams < 2.5f -> RagConfig(
+                    chunkSize = 768,                    // Standard chunks
+                    chunkOverlap = 150,
+                    topK = 7,
+                    similarityThreshold = 0.35f,        // Strict threshold
+                    finalTopK = 3,                      // 3 chunks - balanced
+                    enableReranking = true
+                )
+                
+                // Medium models (2.5B - 4B): Phi-3.5 Mini, Llama 3.2 3B, Qwen 3B
+                actualParams < 4.5f -> RagConfig(
+                    chunkSize = 1024,                   // Larger chunks for better context
+                    chunkOverlap = 200,
+                    topK = 10,                          // More candidates for re-ranking
+                    similarityThreshold = 0.30f,        // Moderate threshold
+                    finalTopK = 5,                      // 5 chunks - more context
+                    enableReranking = true
+                )
+                
+                // Large models (7B+): Mistral 7B, OpenHermes 7B
+                else -> RagConfig(
+                    chunkSize = 1536,                   // Large chunks for rich context
+                    chunkOverlap = 300,
+                    topK = 15,                          // Many candidates
+                    similarityThreshold = 0.25f,        // Lower threshold - model can handle it
+                    finalTopK = 7,                      // 7 chunks - maximum context
+                    enableReranking = true
+                )
+            }
+        }
+        
+        /**
+         * Default config for small models (backward compatible)
+         */
+        fun default() = forModel("0.5B", 4096)
+    }
+}
 
 /**
  * RAG query result

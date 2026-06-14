@@ -36,7 +36,7 @@ class RagEngine(private val context: Context) {
         strategy = TextChunker.ChunkingStrategy.SEMANTIC  // Groups related sentences by topic
     )
     private val structuredChunker = StructuredChunker(chunkSize = 512, chunkOverlap = 50)
-    private val embeddingModel = EmbeddingModel(context)
+    private val embeddingModel = EmbeddingModel(context)  // Neural embeddings with ONNX
     private val vectorDatabase = VectorDatabase(context)
     
     // Profiled wrappers (when profiler is available)
@@ -203,40 +203,61 @@ class RagEngine(private val context: Context) {
     }
     
     /**
-     * Query the RAG system using adaptive retrieval
+     * Query the RAG system using the configured search mode
      * Returns relevant chunks and builds an augmented prompt with citations
      */
     suspend fun query(userQuery: String): RagResult = withContext(Dispatchers.IO) {
         try {
             Log.d(TAG, "╔═══════════════════════════════════════════════════════════════╗")
-            Log.d(TAG, "║           🔍 RAG QUERY (Adaptive Retrieval)                   ║")
+            Log.d(TAG, "║           🔍 RAG QUERY                                        ║")
             Log.d(TAG, "╚═══════════════════════════════════════════════════════════════╝")
             Log.d(TAG, "Query: $userQuery")
             Log.d(TAG, "Search mode: $searchMode")
             
             // 1. Embed the query
+            // Use profiled version if available
             val queryEmbedding = profiledEmbeddingModel?.embed(userQuery)
                 ?: embeddingModel.embed(userQuery)
             
-            // 2. STAGE 1: Quick retrieval with small topK
-            Log.d(TAG, "▶ STAGE 1: Quick retrieval (topK=${config.quickTopK})")
-            val quickResults = performSearch(userQuery, queryEmbedding, config.quickTopK)
-            
-            // 3. STAGE 2: Analyze retrieved chunks
-            val analysis = analyzeRetrievedChunks(quickResults)
-            Log.d(TAG, "▶ STAGE 2: Analysis - tables=${analysis.tableCount}, topScore=${String.format("%.3f", analysis.topScore)}, avgScore=${String.format("%.3f", analysis.avgScore)}")
-            
-            // 4. STAGE 3: Decide optimal topK based on analysis
-            val optimalTopK = determineOptimalTopK(analysis)
-            Log.d(TAG, "▶ STAGE 3: Optimal topK determined: $optimalTopK (reason: ${analysis.reason})")
-            
-            // 5. STAGE 4: Retrieve with optimal topK if needed
-            val results = if (optimalTopK > config.quickTopK) {
-                Log.d(TAG, "▶ STAGE 4: Expanding retrieval to topK=$optimalTopK")
-                performSearch(userQuery, queryEmbedding, optimalTopK)
-            } else {
-                Log.d(TAG, "▶ STAGE 4: Using quick results (sufficient)")
-                quickResults
+            // 2. Search using configured mode
+            val results = when (searchMode) {
+                SearchMode.SEMANTIC -> {
+                    Log.d(TAG, "Using SEMANTIC search (embeddings only)")
+                    // Use profiled version if available
+                    profiledVectorDatabase?.searchSemantic(
+                        queryEmbedding = queryEmbedding,
+                        topK = config.topK,
+                        threshold = config.similarityThreshold
+                    ) ?: vectorDatabase.searchSemantic(
+                        queryEmbedding = queryEmbedding,
+                        topK = config.topK,
+                        threshold = config.similarityThreshold
+                    )
+                }
+                SearchMode.BM25 -> {
+                    Log.d(TAG, "Using BM25 search (keywords only)")
+                    // Use profiled version if available
+                    profiledVectorDatabase?.searchBM25(
+                        query = userQuery,
+                        topK = config.topK
+                    ) ?: vectorDatabase.searchBM25(
+                        query = userQuery,
+                        topK = config.topK
+                    )
+                }
+                SearchMode.HYBRID -> {
+                    Log.d(TAG, "Using HYBRID search (semantic + BM25 with RRF)")
+                    // Use profiled version if available
+                    profiledVectorDatabase?.searchHybrid(
+                        query = userQuery,
+                        queryEmbedding = queryEmbedding,
+                        topK = config.topK
+                    ) ?: vectorDatabase.searchHybrid(
+                        query = userQuery,
+                        queryEmbedding = queryEmbedding,
+                        topK = config.topK
+                    )
+                }
             }
             
             Log.d(TAG, "Found ${results.size} relevant chunks")
@@ -345,45 +366,20 @@ class RagEngine(private val context: Context) {
         }
         
         val contextBuilder = StringBuilder()
-        
-        // Check if context contains tables
-        val hasTables = chunks.any { it.chunk.text.contains("STRUCTURED TABLE DATA") }
-        
-        // Base instructions
         contextBuilder.append("Use the following context to answer the question. ")
         contextBuilder.append("Cite sources using [1], [2], etc. when referencing information.\n\n")
-        
-        // Add table-specific instructions if tables are present
-        if (hasTables) {
-            contextBuilder.append("⚠️ IMPORTANT - TABLES IN CONTEXT:\n")
-            contextBuilder.append("The context contains STRUCTURED TABLES with precise data.\n")
-            contextBuilder.append("When reading tables:\n")
-            contextBuilder.append("• Pay close attention to column headers and row labels\n")
-            contextBuilder.append("• Numbers in tables are EXACT values - do not approximate\n")
-            contextBuilder.append("• Do NOT confuse different columns or rows\n")
-            contextBuilder.append("• Read table captions to understand what the table shows\n")
-            contextBuilder.append("• If a specific value is not in the table, say 'I cannot find this information'\n")
-            contextBuilder.append("• Do NOT make up numbers or trends not shown in the tables\n\n")
-        }
-        
         contextBuilder.append("Context:\n")
         
         for ((index, result) in chunks.withIndex()) {
             contextBuilder.append("---\n")
             contextBuilder.append("[${index + 1}] Source: ${result.documentName}\n")
+            // SEMANTIC chunks are already focused and complete - use them as-is
             contextBuilder.append(result.chunk.text)
             contextBuilder.append("\n")
         }
         
         contextBuilder.append("---\n\n")
         contextBuilder.append("Question: $query\n\n")
-        
-        // Reinforce for tables
-        if (hasTables) {
-            contextBuilder.append("Remember: Read tables carefully. Use exact numbers from the tables. ")
-            contextBuilder.append("If the answer is not in the tables, say so.\n\n")
-        }
-        
         contextBuilder.append("Answer:")
         
         return contextBuilder.toString()
@@ -436,186 +432,10 @@ class RagEngine(private val context: Context) {
     fun isUsingNeuralEmbeddings(): Boolean = embeddingModel.isUsingNeuralEmbeddings()
     
     /**
-     * Perform search with specified topK
-     */
-    private suspend fun performSearch(
-        query: String,
-        queryEmbedding: FloatArray,
-        topK: Int
-    ): List<ChunkSearchResult> {
-        return when (searchMode) {
-            SearchMode.SEMANTIC -> {
-                profiledVectorDatabase?.searchSemantic(
-                    queryEmbedding = queryEmbedding,
-                    topK = topK,
-                    threshold = config.similarityThreshold
-                ) ?: vectorDatabase.searchSemantic(
-                    queryEmbedding = queryEmbedding,
-                    topK = topK,
-                    threshold = config.similarityThreshold
-                )
-            }
-            SearchMode.BM25 -> {
-                profiledVectorDatabase?.searchBM25(
-                    query = query,
-                    topK = topK
-                ) ?: vectorDatabase.searchBM25(
-                    query = query,
-                    topK = topK
-                )
-            }
-            SearchMode.HYBRID -> {
-                profiledVectorDatabase?.searchHybrid(
-                    query = query,
-                    queryEmbedding = queryEmbedding,
-                    topK = topK
-                ) ?: vectorDatabase.searchHybrid(
-                    query = query,
-                    queryEmbedding = queryEmbedding,
-                    topK = topK
-                )
-            }
-        }
-    }
-    
-    /**
-     * Analysis result for retrieved chunks
-     */
-    private data class ChunkAnalysis(
-        val tableCount: Int,
-        val topScore: Float,
-        val avgScore: Float,
-        val hasMultipleTables: Boolean,
-        val hasSingleTable: Boolean,
-        val hasNoTables: Boolean,
-        val isHighConfidence: Boolean,
-        val isLowConfidence: Boolean,
-        val reason: String
-    )
-    
-    /**
-     * Analyze retrieved chunks to determine optimal retrieval strategy
-     */
-    private fun analyzeRetrievedChunks(chunks: List<ChunkSearchResult>): ChunkAnalysis {
-        if (chunks.isEmpty()) {
-            return ChunkAnalysis(
-                tableCount = 0,
-                topScore = 0f,
-                avgScore = 0f,
-                hasMultipleTables = false,
-                hasSingleTable = false,
-                hasNoTables = true,
-                isHighConfidence = false,
-                isLowConfidence = true,
-                reason = "No results found"
-            )
-        }
-        
-        val tableChunks = chunks.filter { 
-            it.chunk.text.contains("STRUCTURED TABLE DATA") 
-        }
-        val tableCount = tableChunks.size
-        val topScore = chunks.firstOrNull()?.score ?: 0f
-        val avgScore = chunks.map { it.score }.average().toFloat()
-        
-        val hasMultipleTables = tableCount >= 2
-        val hasSingleTable = tableCount == 1
-        val hasNoTables = tableCount == 0
-        val isHighConfidence = topScore >= config.highConfidenceThreshold
-        val isLowConfidence = topScore < config.lowConfidenceThreshold
-        
-        // Determine reason
-        val reason = when {
-            hasMultipleTables -> "Multiple tables detected"
-            hasSingleTable -> "Single table detected"
-            isLowConfidence -> "Low confidence score"
-            isHighConfidence && hasNoTables -> "High confidence, no tables"
-            else -> "Normal retrieval"
-        }
-        
-        return ChunkAnalysis(
-            tableCount = tableCount,
-            topScore = topScore,
-            avgScore = avgScore,
-            hasMultipleTables = hasMultipleTables,
-            hasSingleTable = hasSingleTable,
-            hasNoTables = hasNoTables,
-            isHighConfidence = isHighConfidence,
-            isLowConfidence = isLowConfidence,
-            reason = reason
-        )
-    }
-    
-    /**
-     * Determine optimal topK based on chunk analysis
-     */
-    private fun determineOptimalTopK(analysis: ChunkAnalysis): Int {
-        return when {
-            // High confidence, no tables = simple question
-            analysis.isHighConfidence && analysis.hasNoTables -> {
-                config.simpleTopK
-            }
-            
-            // Multiple tables = complex data question
-            analysis.hasMultipleTables -> {
-                config.tableTopK
-            }
-            
-            // Single table = moderate data question
-            analysis.hasSingleTable -> {
-                (config.tableTopK + config.topK) / 2  // Average of table and default
-            }
-            
-            // Low confidence = need more context
-            analysis.isLowConfidence -> {
-                config.lowConfidenceTopK
-            }
-            
-            // Default
-            else -> {
-                config.topK
-            }
-        }
-    }
-    
-    /**
      * Update RAG configuration
      */
     fun updateConfig(newConfig: RagConfig) {
         config = newConfig
-    }
-    
-    /**
-     * Update RAG configuration based on loaded model parameters
-     * Adjusts retrieval settings based on model size and context window
-     */
-    fun updateModelConfig(modelParameters: String, contextSize: Int) {
-        Log.d(TAG, "Updating RAG config for model: $modelParameters, context: $contextSize")
-        
-        // Adjust topK based on context size
-        // Larger context = can handle more chunks
-        val adjustedTopK = when {
-            contextSize >= 8000 -> 8  // Large context, can use more chunks
-            contextSize >= 4000 -> 6  // Medium context
-            else -> 4  // Small context, use fewer chunks
-        }
-        
-        // Adjust chunk sizes based on model size
-        val (chunkSize, overlap) = when {
-            modelParameters.contains("135M") -> Pair(384, 50)   // Smaller model, smaller chunks
-            modelParameters.contains("360M") -> Pair(512, 64)   // Medium model
-            modelParameters.contains("1.7B") -> Pair(640, 80)   // Larger model, larger chunks
-            else -> Pair(512, 64)  // Default
-        }
-        
-        // Update configuration
-        config = config.copy(
-            topK = adjustedTopK,
-            chunkSize = chunkSize,
-            chunkOverlap = overlap
-        )
-        
-        Log.d(TAG, "RAG config updated: topK=$adjustedTopK, chunkSize=$chunkSize, overlap=$overlap")
     }
     
     fun close() {
