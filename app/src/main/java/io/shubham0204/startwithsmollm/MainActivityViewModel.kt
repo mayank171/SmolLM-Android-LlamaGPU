@@ -30,6 +30,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.io.File
 
 // Extension function for formatting doubles
 private fun Double.format(decimals: Int): String = "%.${decimals}f".format(this)
@@ -133,6 +136,17 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private var inferenceJob: Job? = null
     private var estimatedTokenCount: Int = 0
     private var maxContextSize: Int = deviceProfile.maxContextSize
+    
+    // Background summarization state
+    private var isSummarizing = false
+    private var currentSummary: String = ""  // Accumulates over time
+    
+    // Mutex to prevent concurrent access to llama context
+    private val llamaMutex = Mutex()
+    
+    // Background summarization - uses main model with tryLock
+    private val summaryBuffer = mutableListOf<String>() // Stores incremental summaries
+    private var isBackgroundSummarizing = false
     
     // Expert mode - inference insights
     val isExpertMode = ExpertMode.isExpertMode
@@ -705,12 +719,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 
                 android.util.Log.d("SmolLM", "Context before query: $realUsage% (${getRealContextUsage()}/${maxContextSize} tokens)")
                 
-                if (realUsage >= 70 && currentModel?.supportsMultiTurn == true && currentMessages.size >= 2) {
-                    android.util.Log.d("SmolLM", "Triggering context trim at $realUsage%")
-                    trimOldMessages()
-                    showContextTrimmedMessage()
-                }
-                
                 // Check if RAG is enabled and use augmented prompt
                 val ragEnabled = _appStateFlow.value.chatState.ragEnabled
                 var citations: List<io.shubham0204.startwithsmollm.rag.Citation> = emptyList()
@@ -757,8 +765,10 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 val inferenceStart = System.currentTimeMillis()
                 lastTokenTime = inferenceStart
                 
-                // Stream tokens one by one
-                llamaGPU.getResponseAsFlow(finalQuery).collect { token ->
+                // Acquire mutex to prevent concurrent llama access (e.g., from summarization)
+                llamaMutex.withLock {
+                    // Stream tokens one by one
+                    llamaGPU.getResponseAsFlow(finalQuery).collect { token ->
                     val now = System.currentTimeMillis()
                     
                     // Track TTFT (Time To First Token)
@@ -792,7 +802,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                             )
                         }
                     }
-                }
+                    }
+                } // End of llamaMutex.withLock
                 
                 val totalTime = System.currentTimeMillis() - inferenceStart
                 
@@ -901,6 +912,18 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     }
                 }
             }
+        }
+        
+        // Check for summarization AFTER the inference job completes
+        inferenceJob?.invokeOnCompletion {
+            // Wait a bit for user to start reading, then summarize in background
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(2000) // Wait 2 seconds for user to start reading
+                summarizeLastExchange()
+            }
+            
+            // Check if we need to rebuild KV cache
+            checkAndTriggerSummarization()
         }
     }
     
@@ -1020,6 +1043,277 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         android.util.Log.d("SmolLM", "🎯 Context usage: ${(currentTokens.toFloat() / maxContextSize * 100).toInt()}% → $newUsage%")
         android.util.Log.d("SmolLM", "💾 Tokens: $currentTokens → ${getRealContextUsage()} (freed ${currentTokens - getRealContextUsage()} tokens)")
         android.util.Log.d("SmolLM", "")
+    }
+    
+    private suspend fun summarizeOldMessagesInBackground() {
+        if (isSummarizing) return
+        
+        // Try to acquire lock - if already locked (inference running), skip summarization
+        if (!llamaMutex.tryLock()) {
+            android.util.Log.d("SmolLM", "⚠️ Llama context busy, skipping summarization")
+            return
+        }
+        
+        try {
+            val messages = _appStateFlow.value.chatState.messages
+        
+        // Find where the summary message is (if it exists)
+        val summaryIndex = messages.indexOfFirst { 
+            it.userRole == UserRole.LLM && it.content.startsWith("📝")
+        }
+        
+        // Determine what to summarize
+        val startIdx: Int
+        val messagesToSummarize: Int
+        
+        if (summaryIndex >= 0) {
+            // We have a previous summary - summarize messages after it
+            startIdx = summaryIndex + 1
+            messagesToSummarize = minOf(10, messages.size - startIdx - 5) // Keep at least 5 recent
+        } else {
+            // First summarization - start from beginning
+            startIdx = 0
+            messagesToSummarize = minOf(10, messages.size - 5)
+        }
+        
+        if (messagesToSummarize < 2) {
+            android.util.Log.d("SmolLM", "⚠️ Not enough messages to summarize yet")
+            return
+        }
+        
+        isSummarizing = true
+        
+        try {
+            val totalMessages = messages.size
+            val recentMessagesToKeep = totalMessages - startIdx - messagesToSummarize
+            
+            val contextBefore = getRealContextUsage()
+            val contextPercentBefore = calculateContextUsage()
+            
+            android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
+            android.util.Log.d("SmolLM", "║           🔄 ROLLING SUMMARIZATION STARTED                    ║")
+            android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
+            android.util.Log.d("SmolLM", "Total messages: $totalMessages")
+            android.util.Log.d("SmolLM", "Context before: $contextPercentBefore% ($contextBefore/$maxContextSize tokens)")
+            android.util.Log.d("SmolLM", "Previous summary exists: ${summaryIndex >= 0}")
+            android.util.Log.d("SmolLM", "Messages to summarize: $messagesToSummarize (indices $startIdx-${startIdx + messagesToSummarize - 1})")
+            android.util.Log.d("SmolLM", "Recent messages to keep: $recentMessagesToKeep")
+            android.util.Log.d("SmolLM", "")
+            
+            // Log messages being summarized
+            android.util.Log.d("SmolLM", "📋 MESSAGES BEING SUMMARIZED:")
+            android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
+            for (i in startIdx until (startIdx + messagesToSummarize).coerceAtMost(messages.size)) {
+                val msg = messages[i]
+                val role = if (msg.userRole == UserRole.HUMAN) "👤 USER" else "🤖 ASSISTANT"
+                val preview = msg.content.take(80) + if (msg.content.length > 80) "..." else ""
+                android.util.Log.d("SmolLM", "[$i] $role: \"$preview\"")
+            }
+            android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
+            android.util.Log.d("SmolLM", "")
+            
+            val startTime = System.currentTimeMillis()
+            
+            // Use ALL pre-computed summaries from buffer and accumulate them
+            android.util.Log.d("SmolLM", "📚 Buffer has ${summaryBuffer.size} pre-computed summaries available")
+            val newSummary = if (summaryBuffer.isNotEmpty()) {
+                // Use ALL summaries in buffer - each one covers one response
+                android.util.Log.d("SmolLM", "📝 Using ALL ${summaryBuffer.size} summaries from buffer:")
+                summaryBuffer.forEachIndexed { index, summary ->
+                    android.util.Log.d("SmolLM", "  [$index] $summary")
+                }
+                val combinedSummary = summaryBuffer.joinToString("\n\n")
+                summaryBuffer.clear() // Clear all used summaries
+                android.util.Log.d("SmolLM", "📚 Buffer cleared (all summaries used)")
+                combinedSummary
+            } else {
+                // Fallback: generate summary if buffer is empty
+                android.util.Log.d("SmolLM", "⚠️ No pre-computed summaries, generating on-demand...")
+                withContext(Dispatchers.IO) {
+                    llamaGPU.summarizeMessages(startIdx, messagesToSummarize)
+                }
+            }
+            
+            val summaryTime = System.currentTimeMillis() - startTime
+            
+            // Accumulate: previous summary + new summary
+            currentSummary = if (currentSummary.isEmpty()) {
+                newSummary
+            } else {
+                "$currentSummary\n\nThen: $newSummary"
+            }
+            
+            // Check if accumulated summary is too large (>4000 tokens ~= 16000 chars)
+            val summaryTokenEstimate = estimateTokens(currentSummary)
+            android.util.Log.d("SmolLM", "📊 Accumulated summary tokens: ~$summaryTokenEstimate")
+            
+            if (summaryTokenEstimate > 4000) {
+                android.util.Log.d("SmolLM", "⚠️ Summary too large ($summaryTokenEstimate tokens), compressing...")
+                
+                // Summarize the summary itself to compress it
+                val compressedSummary = withContext(Dispatchers.IO) {
+                    val compressPrompt = """Compress this conversation summary into a shorter version (max 1500 tokens), keeping the most important information:
+
+$currentSummary
+
+Compressed summary:"""
+                    val compressed = StringBuilder()
+                    llamaGPU.getResponseAsFlow(compressPrompt).collect { token ->
+                        compressed.append(token)
+                    }
+                    compressed.toString().trim()
+                }
+                
+                currentSummary = compressedSummary
+                val newTokenCount = estimateTokens(currentSummary)
+                android.util.Log.d("SmolLM", "✅ Summary compressed: $summaryTokenEstimate → $newTokenCount tokens")
+                android.util.Log.d("SmolLM", "📝 Compressed summary: $currentSummary")
+            }
+            
+            android.util.Log.d("SmolLM", "✅ Summary prepared in ${summaryTime}ms (using pre-computed)")
+            android.util.Log.d("SmolLM", "📝 New summary: $newSummary")
+            android.util.Log.d("SmolLM", "📚 Accumulated summary: $currentSummary")
+            android.util.Log.d("SmolLM", "")
+            
+            // Rebuild KV cache with accumulated summary (takes ~1-2 seconds)
+            android.util.Log.d("SmolLM", "🔧 Rebuilding KV cache with accumulated summary...")
+            val rebuildStartTime = System.currentTimeMillis()
+            withContext(Dispatchers.IO) {
+                llamaGPU.rebuildCacheWithSummary(currentSummary, recentMessagesToKeep)
+            }
+            
+            val rebuildTime = System.currentTimeMillis() - rebuildStartTime
+            android.util.Log.d("SmolLM", "✅ KV cache rebuilt in ${rebuildTime}ms")
+            android.util.Log.d("SmolLM", "")
+            
+            // Update UI - replace old messages with accumulated summary
+            val summaryMessage = ChatMessage(
+                content = "📝 Conversation summary:\n$currentSummary",
+                userRole = UserRole.LLM
+            )
+            
+            val recentMessages = messages.takeLast(recentMessagesToKeep)
+            android.util.Log.d("SmolLM", "📋 RECENT MESSAGES BEING KEPT:")
+            android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
+            recentMessages.forEachIndexed { index, msg ->
+                val role = if (msg.userRole == UserRole.HUMAN) "👤 USER" else "🤖 ASSISTANT"
+                val preview = msg.content.take(80) + if (msg.content.length > 80) "..." else ""
+                android.util.Log.d("SmolLM", "[$index] $role: \"$preview\"")
+            }
+            android.util.Log.d("SmolLM", "─────────────────────────────────────────────────────────────")
+            android.util.Log.d("SmolLM", "")
+            
+            val newMessages = listOf(summaryMessage) + recentMessages
+            
+            withContext(Dispatchers.Main) {
+                _appStateFlow.update { state ->
+                    state.copy(
+                        chatState = state.chatState.copy(
+                            messages = newMessages.toImmutableList(),
+                            contextUsagePercent = calculateContextUsage()
+                        )
+                    )
+                }
+            }
+            
+            // Update token estimate
+            estimatedTokenCount = 50 + newMessages.sumOf { estimateTokens(it.content) }
+            
+            // Get updated context after rebuild
+            val contextAfter = getRealContextUsage()
+            val contextPercentAfter = calculateContextUsage()
+            val tokensSaved = contextBefore - contextAfter
+            
+            val totalTime = System.currentTimeMillis() - startTime
+            
+            android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
+            android.util.Log.d("SmolLM", "║           ✅ ROLLING SUMMARIZATION COMPLETE                   ║")
+            android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
+            android.util.Log.d("SmolLM", "⏱️  Total time: ${totalTime}ms (summary: ${summaryTime}ms, rebuild: ${rebuildTime}ms)")
+            android.util.Log.d("SmolLM", "📊 Messages: $totalMessages → ${newMessages.size} (compressed $messagesToSummarize)")
+            android.util.Log.d("SmolLM", "📚 Summary length: ${currentSummary.length} chars")
+            android.util.Log.d("SmolLM", "🎯 Context: $contextPercentBefore% → $contextPercentAfter% (saved $tokensSaved tokens)")
+            android.util.Log.d("SmolLM", "💾 Tokens: $contextBefore → $contextAfter / $maxContextSize")
+            android.util.Log.d("SmolLM", "")
+            
+            } catch (e: Exception) {
+                android.util.Log.e("SmolLM", "❌ Summarization failed: ${e.message}", e)
+            } finally {
+                isSummarizing = false
+            }
+        } finally {
+            llamaMutex.unlock()
+        }
+    }
+    
+    private fun checkAndTriggerSummarization() {
+        val contextUsage = calculateContextUsage()
+        android.util.Log.d("SmolLM", "🔍 Checking summarization: context=$contextUsage%, isSummarizing=$isSummarizing, inferenceActive=${inferenceJob?.isActive}")
+        
+        // Don't summarize if there's an active inference or already summarizing
+        if (contextUsage >= 60 && !isSummarizing && inferenceJob?.isActive != true) {
+            android.util.Log.d("SmolLM", "🎯 Context at $contextUsage%, triggering rolling summarization")
+            viewModelScope.launch {
+                summarizeOldMessagesInBackground()
+            }
+        } else {
+            android.util.Log.d("SmolLM", "⏭️ Skipping summarization: context=$contextUsage%, threshold=60%")
+        }
+    }
+    
+    private suspend fun summarizeLastExchange() {
+        if (isBackgroundSummarizing) return
+        
+        val messages = _appStateFlow.value.chatState.messages
+        if (messages.size < 2) return
+        
+        // Get last user message and LLM response
+        val lastLLMMessage = messages.lastOrNull { it.userRole == UserRole.LLM } ?: return
+        val lastUserMessage = messages.dropLast(1).lastOrNull { it.userRole == UserRole.HUMAN } ?: return
+        
+        // Try to acquire lock - if user is querying, skip background summarization
+        if (!llamaMutex.tryLock()) {
+            android.util.Log.d("SmolLM", "⏭️ Skipping background summary - user query in progress")
+            return
+        }
+        
+        try {
+            isBackgroundSummarizing = true
+            android.util.Log.d("SmolLM", "")
+            android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
+            android.util.Log.d("SmolLM", "║     📝 BACKGROUND SUMMARIZATION (while user reads)           ║")
+            android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
+            android.util.Log.d("SmolLM", "Buffer size before: ${summaryBuffer.size} summaries")
+            val startTime = System.currentTimeMillis()
+            
+            // Create summarization prompt
+            val prompt = """Summarize this conversation exchange in 1-2 sentences:
+User: ${lastUserMessage.content}
+Assistant: ${lastLLMMessage.content}
+
+Summary:"""
+            
+            // Generate summary using main model
+            val summary = StringBuilder()
+            llamaGPU.getResponseAsFlow(prompt).collect { token ->
+                summary.append(token)
+            }
+            
+            val summaryText = summary.toString().trim()
+            summaryBuffer.add(summaryText)
+            
+            val timeTaken = System.currentTimeMillis() - startTime
+            android.util.Log.d("SmolLM", "✅ Summary generated in ${timeTaken}ms")
+            android.util.Log.d("SmolLM", "📝 Summary: $summaryText")
+            android.util.Log.d("SmolLM", "📚 Buffer size after: ${summaryBuffer.size} summaries (ready for 60% trigger)")
+            android.util.Log.d("SmolLM", "")
+            
+        } catch (e: Exception) {
+            android.util.Log.e("SmolLM", "❌ Background summarization failed: ${e.message}", e)
+        } finally {
+            isBackgroundSummarizing = false
+            llamaMutex.unlock()
+        }
     }
 
     private fun loadModel(model: ModelInfo) {

@@ -332,4 +332,26 @@ class LlamaGPU {
     private external fun shiftContext(modelPtr: Long, keepFirstN: Int, removeNextN: Int): Int
     private external fun getMessageCount(modelPtr: Long): Int
     private external fun removeOldestMessages(modelPtr: Long, count: Int)
+    private external fun summarizeMessages(modelPtr: Long, startIdx: Int, count: Int): String
+    private external fun rebuildCacheWithSummary(modelPtr: Long, summary: String, keepRecentN: Int)
+    
+    /**
+     * Summarize a range of messages in the conversation history
+     * @param startIdx Starting index of messages to summarize (0-based)
+     * @param count Number of messages to summarize
+     * @return Summary text
+     */
+    fun summarizeMessages(startIdx: Int, count: Int): String {
+        return summarizeMessages(nativePtr, startIdx, count)
+    }
+    
+    /**
+     * Rebuild KV cache with a summary replacing old messages
+     * This clears the KV cache and rebuilds it with: [System + Summary + Recent N messages]
+     * @param summary The summary text to inject
+     * @param keepRecentN Number of recent messages to keep
+     */
+    fun rebuildCacheWithSummary(summary: String, keepRecentN: Int) {
+        rebuildCacheWithSummary(nativePtr, summary, keepRecentN)
+    }
 }
