@@ -43,9 +43,9 @@ class VectorDatabase(context: Context) : SQLiteOpenHelper(
         private const val COL_CHUNK_END = "end_char"
         private const val COL_CHUNK_EMBEDDING = "embedding"
         
-        // Hybrid search weights
-        private const val SEMANTIC_WEIGHT = 0.6f
-        private const val BM25_WEIGHT = 0.4f
+        // Hybrid search weights - balanced for better keyword matching
+        private const val SEMANTIC_WEIGHT = 0.5f
+        private const val BM25_WEIGHT = 0.5f  // Equal weight for keywords
         private const val RRF_K = 60  // Reciprocal Rank Fusion constant
     }
     
@@ -251,21 +251,37 @@ class VectorDatabase(context: Context) : SQLiteOpenHelper(
         semanticWeight: Float = SEMANTIC_WEIGHT,
         bm25Weight: Float = BM25_WEIGHT
     ): List<ChunkSearchResult> {
-        // Get results from both search methods
-        val semanticResults = searchSemantic(queryEmbedding, topK * 2)
-        val bm25Results = searchBM25(query, topK * 2)
+        // Get results from both search methods - fetch more candidates for better fusion
+        val semanticResults = searchSemantic(queryEmbedding, topK * 3)
+        val bm25Results = searchBM25(query, topK * 3)
         
         Log.d(TAG, "Hybrid search: ${semanticResults.size} semantic, ${bm25Results.size} BM25 results")
+        
+        // If one method returns nothing, fall back to the other
+        if (semanticResults.isEmpty() && bm25Results.isEmpty()) {
+            Log.w(TAG, "Both search methods returned no results")
+            return emptyList()
+        }
+        if (semanticResults.isEmpty()) {
+            Log.d(TAG, "Falling back to BM25 only (no semantic results)")
+            return bm25Results.take(topK)
+        }
+        if (bm25Results.isEmpty()) {
+            Log.d(TAG, "Falling back to semantic only (no BM25 results)")
+            return semanticResults.take(topK)
+        }
         
         // Calculate RRF scores
         val rrfScores = mutableMapOf<String, Float>()
         val chunkMap = mutableMapOf<String, ChunkSearchResult>()
+        val originalSemanticScores = mutableMapOf<String, Float>()
         
         // Add semantic results with RRF
         for ((rank, result) in semanticResults.withIndex()) {
             val rrfScore = semanticWeight / (RRF_K + rank + 1)
             rrfScores[result.chunk.id] = (rrfScores[result.chunk.id] ?: 0f) + rrfScore
             chunkMap[result.chunk.id] = result
+            originalSemanticScores[result.chunk.id] = result.score
         }
         
         // Add BM25 results with RRF
@@ -278,15 +294,27 @@ class VectorDatabase(context: Context) : SQLiteOpenHelper(
         }
         
         // Sort by RRF score and return top K
-        return rrfScores.entries
+        val results = rrfScores.entries
             .sortedByDescending { it.value }
             .take(topK)
             .mapNotNull { (chunkId, rrfScore) ->
+                val originalScore = originalSemanticScores[chunkId] ?: 0f
+                // Normalize RRF score to 0-1 range and blend with original semantic score
+                val normalizedRrf = (rrfScore * RRF_K).coerceIn(0f, 1f)
+                val blendedScore = (normalizedRrf * 0.6f + originalScore * 0.4f).coerceIn(0f, 1f)
+                
                 chunkMap[chunkId]?.copy(
-                    score = rrfScore,
+                    score = blendedScore,
                     searchType = SearchType.HYBRID
                 )
             }
+        
+        // Log top results for debugging
+        if (results.isNotEmpty()) {
+            Log.d(TAG, "Top hybrid result: score=${results[0].score}, text=${results[0].chunk.text.take(50)}...")
+        }
+        
+        return results
     }
     
     /**

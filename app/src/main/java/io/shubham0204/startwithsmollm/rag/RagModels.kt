@@ -71,8 +71,8 @@ data class ChunkSearchResult(
 data class RagConfig(
     val chunkSize: Int = 768,           // Characters per chunk (~192 tokens) - balanced for quality & speed
     val chunkOverlap: Int = 150,        // ~20% overlap between chunks for better context continuity
-    val topK: Int = 7,                  // Retrieve 7 chunks for re-ranking (balanced for context)
-    val similarityThreshold: Float = 0.35f,  // Higher threshold = better quality chunks
+    val topK: Int = 10,                 // Retrieve 10 chunks for re-ranking (more candidates = better selection)
+    val similarityThreshold: Float = 0.40f,  // Higher threshold = better quality chunks (increased from 0.35)
     val embeddingDimension: Int = 384,  // all-MiniLM-L6-v2 dimension
     val enableReranking: Boolean = true,    // Re-rank retrieved chunks by relevance
     val finalTopK: Int = 3              // Return top 3 after re-ranking - optimized for small models
@@ -91,22 +91,23 @@ data class RagConfig(
             
             return when {
                 // Ultra-small models (< 1B): SmolLM 360M, Qwen 0.5B
+                // These models need VERY focused context - only 1 chunk
                 actualParams < 1.0f -> RagConfig(
-                    chunkSize = 512,                    // Smaller chunks for limited capacity
-                    chunkOverlap = 100,
-                    topK = 5,                           // Fewer candidates
-                    similarityThreshold = 0.40f,        // Very strict - only best matches
-                    finalTopK = 2,                      // Only 2 chunks to avoid confusion
-                    enableReranking = true
+                    chunkSize = 600,                    // Slightly larger to avoid splitting enumerations
+                    chunkOverlap = 150,                  // 25% overlap so lists/formulas aren't cut mid-item
+                    topK = 15,                          // More candidates so dedup has diverse options
+                    similarityThreshold = 0.35f,        // Lower threshold - let re-ranking pick the best
+                    finalTopK = 3,                      // 3 chunks - balance between context and noise
+                    enableReranking = true              // CRITICAL: re-ranking picks the best chunk
                 )
                 
                 // Small models (1B - 2B): TinyLlama 1.1B, Qwen 1.5B, Gemma 2B
                 actualParams < 2.5f -> RagConfig(
-                    chunkSize = 768,                    // Standard chunks
-                    chunkOverlap = 150,
-                    topK = 7,
-                    similarityThreshold = 0.35f,        // Strict threshold
-                    finalTopK = 3,                      // 3 chunks - balanced
+                    chunkSize = 640,                    // Moderate chunks with overlap
+                    chunkOverlap = 160,                  // 25% overlap
+                    topK = 15,                          // More candidates so dedup has diverse options
+                    similarityThreshold = 0.35f,
+                    finalTopK = 3,                      // 3 chunks - balance between context and noise
                     enableReranking = true
                 )
                 

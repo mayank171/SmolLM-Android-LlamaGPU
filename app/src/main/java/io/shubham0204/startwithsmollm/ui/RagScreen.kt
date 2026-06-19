@@ -4,7 +4,10 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,10 +38,15 @@ fun RagScreen(
     onAddDocument: (Uri) -> Unit,
     onDeleteDocument: (String) -> Unit,
     onDeleteAllDocuments: () -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenBenchmark: () -> Unit = {}
 ) {
     var showDeleteAllDialog by remember { mutableStateOf(false) }
     var documentToDelete by remember { mutableStateOf<Document?>(null) }
+    // Easter egg: tap "Knowledge Base" title 7 times to reveal/hide the RAG Benchmark icon.
+    var benchmarkVisible by rememberSaveable { mutableStateOf(false) }
+    var titleTapCount by remember { mutableStateOf(0) }
+    var lastTapTime by remember { mutableStateOf(0L) }
     
     val documentPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -52,7 +60,20 @@ fun RagScreen(
                 title = {
                     Text(
                         "Knowledge Base",
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() }
+                        ) {
+                            val now = System.currentTimeMillis()
+                            // Reset streak if more than 1.5s since last tap
+                            titleTapCount = if (now - lastTapTime > 1500) 1 else titleTapCount + 1
+                            lastTapTime = now
+                            if (titleTapCount >= 7) {
+                                benchmarkVisible = !benchmarkVisible
+                                titleTapCount = 0
+                            }
+                        }
                     )
                 },
                 navigationIcon = {
@@ -61,6 +82,11 @@ fun RagScreen(
                     }
                 },
                 actions = {
+                    if (benchmarkVisible) {
+                        IconButton(onClick = onOpenBenchmark) {
+                            Icon(Icons.Default.Speed, "RAG Benchmark")
+                        }
+                    }
                     if (documents.isNotEmpty()) {
                         IconButton(onClick = { showDeleteAllDialog = true }) {
                             Icon(Icons.Default.DeleteSweep, "Delete All")

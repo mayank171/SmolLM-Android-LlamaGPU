@@ -326,6 +326,7 @@ class StructuredChunker(
     
     /**
      * Chunk a table - try to keep together, split by rows if too large
+     * IMPORTANT: Always preserve header context and add row summaries for better retrieval
      */
     private fun chunkTable(
         element: DocumentElement,
@@ -335,8 +336,8 @@ class StructuredChunker(
         val chunks = mutableListOf<StructuredChunk>()
         val content = element.content
         
-        if (content.length <= chunkSize) {
-            // Table fits in one chunk
+        // For smaller tables, keep them whole
+        if (content.length <= chunkSize * 1.5) {  // Allow slightly larger tables to stay whole
             chunks.add(StructuredChunk(
                 text = content,
                 type = ElementType.TABLE,
@@ -344,39 +345,67 @@ class StructuredChunker(
                 sectionContext = sectionContext,
                 metadata = element.metadata
             ))
-        } else {
-            // Split table by rows, keeping header
-            val lines = content.lines()
-            val header = lines.take(2).joinToString("\n")  // Header + separator
+            return chunks
+        }
+        
+        // For large tables, split intelligently
+        val lines = content.lines()
+        
+        // Find header lines (first row + separator if markdown table)
+        val headerEndIndex = lines.indexOfFirst { it.contains("---") }.let { if (it >= 0) it + 1 else 2 }
+        val headerLines = lines.take(headerEndIndex)
+        val header = headerLines.joinToString("\n")
+        val headerRow = headerLines.firstOrNull { it.contains("|") } ?: ""
+        
+        // Extract column names for context
+        val columnNames = headerRow.split("|").map { it.trim() }.filter { it.isNotEmpty() }
+        val tableContext = if (columnNames.isNotEmpty()) {
+            "[Table columns: ${columnNames.joinToString(", ")}]\n"
+        } else ""
+        
+        var currentChunk = StringBuilder(tableContext + header)
+        var rowsInChunk = 0
+        var pos = startPosition
+        
+        for (i in headerEndIndex until lines.size) {
+            val line = lines[i]
+            if (line.isBlank()) continue
             
-            var currentChunk = header
-            var pos = startPosition
+            val potentialLength = currentChunk.length + line.length + 1
             
-            for (i in 2 until lines.size) {
-                val line = lines[i]
-                if ((currentChunk + "\n" + line).length > chunkSize && currentChunk != header) {
-                    chunks.add(StructuredChunk(
-                        text = currentChunk,
-                        type = ElementType.TABLE,
-                        position = pos++,
-                        sectionContext = sectionContext,
-                        metadata = mapOf("partial" to "true")
-                    ))
-                    currentChunk = header + "\n" + line
-                } else {
-                    currentChunk += "\n" + line
-                }
-            }
-            
-            if (currentChunk.isNotEmpty() && currentChunk != header) {
+            // Split when chunk gets too large, but ensure at least 3 data rows per chunk
+            if (potentialLength > chunkSize && rowsInChunk >= 3) {
+                // Add summary of what rows this chunk contains
+                val chunkText = currentChunk.toString()
                 chunks.add(StructuredChunk(
-                    text = currentChunk,
+                    text = chunkText,
                     type = ElementType.TABLE,
-                    position = pos,
+                    position = pos++,
                     sectionContext = sectionContext,
-                    metadata = element.metadata
+                    metadata = mapOf(
+                        "partial" to "true",
+                        "rows" to rowsInChunk.toString(),
+                        "columns" to columnNames.size.toString()
+                    )
                 ))
+                // Start new chunk with header context
+                currentChunk = StringBuilder(tableContext + header + "\n" + line)
+                rowsInChunk = 1
+            } else {
+                currentChunk.append("\n").append(line)
+                if (line.contains("|")) rowsInChunk++
             }
+        }
+        
+        // Add final chunk
+        if (currentChunk.isNotEmpty() && currentChunk.toString() != tableContext + header) {
+            chunks.add(StructuredChunk(
+                text = currentChunk.toString(),
+                type = ElementType.TABLE,
+                position = pos,
+                sectionContext = sectionContext,
+                metadata = element.metadata + mapOf("rows" to rowsInChunk.toString())
+            ))
         }
         
         return chunks

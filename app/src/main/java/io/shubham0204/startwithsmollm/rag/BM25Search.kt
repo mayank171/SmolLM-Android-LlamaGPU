@@ -175,13 +175,32 @@ class BM25Search(
     
     /**
      * Tokenize text into terms
+     * Note: Numbers are kept regardless of length for queries like "week 4"
+     * Also creates compound tokens like "week4" for better matching
      */
     private fun tokenize(text: String): List<String> {
-        return text.lowercase()
-            .replace(Regex("[^a-z0-9\\s]"), " ")
+        val normalized = text.lowercase().replace(Regex("[^a-z0-9\\s]"), " ")
+        val basicTokens = normalized
             .split(Regex("\\s+"))
-            .filter { it.length > 2 && it !in stopwords }
-            .map { stem(it) }
+            .filter { token -> 
+                // Keep numbers (any length) or words longer than 2 chars that aren't stopwords
+                token.all { it.isDigit() } || (token.length > 2 && token !in stopwords)
+            }
+            .map { if (it.all { c -> c.isDigit() }) it else stem(it) }  // Don't stem numbers
+        
+        // Also create compound tokens for patterns like "week 4" -> "week4"
+        val compoundTokens = mutableListOf<String>()
+        val words = normalized.split(Regex("\\s+"))
+        for (i in 0 until words.size - 1) {
+            val current = words[i]
+            val next = words[i + 1]
+            // If current is a word and next is a number, create compound
+            if (current.all { it.isLetter() } && next.all { it.isDigit() }) {
+                compoundTokens.add("$current$next")  // "week" + "4" -> "week4"
+            }
+        }
+        
+        return basicTokens + compoundTokens
     }
     
     /**
