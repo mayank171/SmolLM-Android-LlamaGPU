@@ -554,12 +554,17 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         // Fresh session: clear any leftover summary state from a previous model/session
         resetSummarizationState()
         estimatedTokenCount = 50
+        
+        // Disable RAG if model doesn't support it
+        val ragEnabled = if (model.supportsRag) _appStateFlow.value.chatState.ragEnabled else false
+        
         _appStateFlow.update { state ->
             state.copy(
                 currentScreen = AppScreen.CHAT,
                 chatState = ChatUIState(
                     modelLoadingState = ModelLoadingState.LOADING,
-                    currentModelName = model.name
+                    currentModelName = model.name,
+                    ragEnabled = ragEnabled
                 )
             )
         }
@@ -804,6 +809,18 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     }
     
     private fun setRagEnabled(enabled: Boolean) {
+        // Check if current model supports RAG
+        if (enabled && currentModel?.supportsRag == false) {
+            _appStateFlow.update { state ->
+                state.copy(
+                    chatState = state.chatState.copy(
+                        toastMessage = "This model doesn't support RAG. Use a larger model (0.5B+)."
+                    )
+                )
+            }
+            return
+        }
+        
         _appStateFlow.update { state ->
             state.copy(
                 chatState = state.chatState.copy(ragEnabled = enabled)
@@ -1372,22 +1389,14 @@ Compressed summary:"""
             android.util.Log.d("SmolLM", "📋 KV rebuild scheduled (will happen on next query)")
             android.util.Log.d("SmolLM", "")
             
-            // UI: Keep all original messages visible to user + append summary marker at end
+            // UI: Keep all original messages visible to user (summary is invisible to user)
             // Internal KV cache: Only system + summary (no old messages) - handled by rebuildCacheWithSummary
-            val summaryMessage = ChatMessage(
-                content = "📝 Conversation summary (model context compressed):\n$currentSummary",
-                userRole = UserRole.LLM
-            )
-            
-            // Remove any previous summary marker from UI to avoid duplicates
-            val messagesWithoutOldSummary = messages.filter { 
+            // Clean up any legacy summary markers from previous versions
+            val cleanedMessages = messages.filter {
                 !(it.userRole == UserRole.LLM && it.content.startsWith("📝 Conversation summary"))
             }
             
-            // UI shows: all original messages + new summary marker at the end
-            val newMessages = messagesWithoutOldSummary + summaryMessage
-            
-            android.util.Log.d("SmolLM", "📋 UI: Keeping all ${messagesWithoutOldSummary.size} original messages + summary marker")
+            android.util.Log.d("SmolLM", "📋 UI: Keeping all ${cleanedMessages.size} original messages (summary hidden)")
             android.util.Log.d("SmolLM", "📋 KV cache: Only summary (~${estimateTokens(currentSummary)} tokens)")
             android.util.Log.d("SmolLM", "")
             
@@ -1395,7 +1404,7 @@ Compressed summary:"""
                 _appStateFlow.update { state ->
                     state.copy(
                         chatState = state.chatState.copy(
-                            messages = newMessages.toImmutableList(),
+                            messages = cleanedMessages.toImmutableList(),
                             contextUsagePercent = calculateContextUsage()
                         )
                     )
@@ -1416,7 +1425,7 @@ Compressed summary:"""
             android.util.Log.d("SmolLM", "║           ✅ ROLLING SUMMARIZATION PREPARED                   ║")
             android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
             android.util.Log.d("SmolLM", "⏱️  Prep time: ${totalTime}ms (KV rebuild deferred to next query)")
-            android.util.Log.d("SmolLM", "📊 Messages: $totalMessages → ${newMessages.size} (compressed $messagesToSummarize)")
+            android.util.Log.d("SmolLM", "📊 Messages: $totalMessages → ${cleanedMessages.size} (compressed $messagesToSummarize)")
             android.util.Log.d("SmolLM", "📚 Summary length: ${currentSummary.length} chars (~${estimateTokens(currentSummary)} tokens)")
             android.util.Log.d("SmolLM", "")
             

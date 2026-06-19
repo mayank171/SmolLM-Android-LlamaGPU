@@ -83,8 +83,10 @@ object DeviceCapabilities {
     
     fun getModelCompatibility(model: ModelInfo, profile: DeviceProfile): ModelCompatibility {
         val requiredRamGB = when {
-            model.sizeInMB >= 1500 -> 6f  // Gemma 2B
-            model.sizeInMB >= 1000 -> 5f  // Qwen 1.5B
+            model.sizeInMB >= 4000 -> 8f  // 7B models (Mistral, OpenHermes)
+            model.sizeInMB >= 2000 -> 6f  // 3B models (Llama 3.2, Qwen 3B, Phi-3.5)
+            model.sizeInMB >= 1500 -> 5f  // Gemma 2B
+            model.sizeInMB >= 1000 -> 4f  // Qwen 1.5B
             model.sizeInMB >= 400 -> 3f   // Qwen 0.5B
             else -> 2f                     // SmolLM 360M
         }
@@ -99,21 +101,32 @@ object DeviceCapabilities {
     
     fun getContextSizeForModel(model: ModelInfo, profile: DeviceProfile): Int {
         // Adjust context based on model size and device capability
-        // With Q8_0 KV cache, we have more headroom
+        // 7B models need MUCH more memory for weights (~4.4GB) + KV cache
+        // Must be very conservative to avoid OOM crashes
+        
         val baseContext = profile.maxContextSize
         
-        // Larger models need more memory for weights, so reduce context
-        // With Q8_0 KV cache, we have 50% memory savings, so less reduction needed
+        // Larger models need more memory for weights, so reduce context aggressively
         val contextMultiplier = when {
+            model.sizeInMB >= 4000 -> 0.25f  // 7B models - 25% context (very conservative!)
+            model.sizeInMB >= 2000 -> 0.5f   // 3B models - 50% context
             model.sizeInMB >= 1500 -> 0.75f  // Gemma 2B - 75% context
             model.sizeInMB >= 1000 -> 1.0f   // Qwen 1.5B - FULL context (Q8_0 is efficient!)
             else -> 1.0f                      // Smaller models - full context
         }
         
+        // For 7B models, also cap absolute context to prevent crashes
+        val maxAbsoluteContext = when {
+            model.sizeInMB >= 4000 -> 1024   // 7B models: max 1K context
+            model.sizeInMB >= 2000 -> 2048   // 3B models: max 2K context
+            else -> Int.MAX_VALUE
+        }
+        
         // Also respect model's own maxContextSize limit
         return minOf(
             (baseContext * contextMultiplier).toInt(),
-            model.maxContextSize
+            model.maxContextSize,
+            maxAbsoluteContext
         ).coerceAtLeast(512)
     }
 }
