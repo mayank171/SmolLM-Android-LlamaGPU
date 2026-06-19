@@ -156,6 +156,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private var useDualModelSummarization = false  // True for models >1GB
     private var downloadJob: Job? = null
     private var inferenceJob: Job? = null
+    private var summarizationJob: Job? = null  // Track summarization job for cancellation
     private var estimatedTokenCount: Int = 0
     private var maxContextSize: Int = deviceProfile.maxContextSize
     
@@ -193,11 +194,49 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     
     override fun onCleared() {
         super.onCleared()
-        // Cleanup summarizer model if loaded
-        summarizerGPU?.let {
-            android.util.Log.d("SmolLM", "🧹 Cleaning up summarizer model...")
-            // LlamaGPU cleanup happens automatically
+        android.util.Log.d("SmolLM", "🧹 ViewModel onCleared - cleaning up...")
+        
+        // Stop native inference first (before cancelling jobs)
+        try {
+            llamaGPU.stopInference()
+        } catch (e: Exception) {
+            android.util.Log.w("SmolLM", "Error stopping inference: ${e.message}")
         }
+        
+        summarizerGPU?.let {
+            try {
+                it.stopInference()
+            } catch (e: Exception) {
+                android.util.Log.w("SmolLM", "Error stopping summarizer: ${e.message}")
+            }
+        }
+        
+        // Cancel all jobs
+        inferenceJob?.cancel()
+        summarizationJob?.cancel()
+        downloadJob?.cancel()
+        ragBenchmarkJob?.cancel()
+        
+        // Reset state
+        isBackgroundSummarizing = false
+        isSummarizing = false
+        
+        // Cleanup models (stopInference already called, close should be safe)
+        try {
+            llamaGPU.close()
+        } catch (e: Exception) {
+            android.util.Log.w("SmolLM", "Error closing main model: ${e.message}")
+        }
+        
+        summarizerGPU?.let {
+            try {
+                it.close()
+            } catch (e: Exception) {
+                android.util.Log.w("SmolLM", "Error closing summarizer: ${e.message}")
+            }
+        }
+        
+        android.util.Log.d("SmolLM", "✅ ViewModel cleanup complete")
     }
     
     private fun initializeVoice() {
@@ -572,8 +611,61 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private fun backToModelSelection() {
-        // Close the model to free resources
-        llamaGPU.close()
+        // Cancel all ongoing jobs to prevent crashes
+        android.util.Log.d("SmolLM", "🔙 Back to model selection - stopping inference and cancelling jobs...")
+        
+        // Cancel the coroutine jobs first
+        inferenceJob?.cancel()
+        inferenceJob = null
+        
+        summarizationJob?.cancel()
+        summarizationJob = null
+        
+        // Reset summarization state
+        isBackgroundSummarizing = false
+        isSummarizing = false
+        synchronized(pendingSummarizationQueue) {
+            pendingSummarizationQueue.clear()
+        }
+        
+        // Stop inference and close models on IO thread to avoid blocking UI
+        // The close() method will wait for inference to actually stop
+        viewModelScope.launch(Dispatchers.IO) {
+            // Stop and wait for inference to finish before closing
+            android.util.Log.d("SmolLM", "⏳ Waiting for inference to stop...")
+            val mainStopped = llamaGPU.stopInferenceAndWait(2000)
+            if (!mainStopped) {
+                android.util.Log.w("SmolLM", "⚠️ Main model inference didn't stop in time")
+            }
+            
+            summarizerGPU?.let {
+                val summarizerStopped = it.stopInferenceAndWait(1000)
+                if (!summarizerStopped) {
+                    android.util.Log.w("SmolLM", "⚠️ Summarizer inference didn't stop in time")
+                }
+            }
+            
+            // Now safe to close the models
+            try {
+                llamaGPU.close()
+                android.util.Log.d("SmolLM", "✅ Main model closed")
+            } catch (e: Exception) {
+                android.util.Log.w("SmolLM", "Error closing model: ${e.message}")
+            }
+            
+            // Close summarizer if loaded
+            summarizerGPU?.let {
+                try {
+                    it.close()
+                    android.util.Log.d("SmolLM", "✅ Summarizer model closed")
+                } catch (e: Exception) {
+                    android.util.Log.w("SmolLM", "Error closing summarizer: ${e.message}")
+                }
+                summarizerGPU = null
+            }
+            
+            android.util.Log.d("SmolLM", "✅ All jobs cancelled, models closed")
+        }
         
         _appStateFlow.update { state ->
             state.copy(
@@ -978,11 +1070,19 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 
                 // Execute pending KV rebuild if any (deferred from rolling summarization)
                 pendingKVRebuild?.let { (summary, recentMessagesToKeep) ->
-                    android.util.Log.d("SmolLM", "🔧 Executing deferred KV rebuild...")
-                    val rebuildStart = System.currentTimeMillis()
-                    llamaGPU.rebuildCacheWithSummary(summary, recentMessagesToKeep)
-                    val rebuildTime = System.currentTimeMillis() - rebuildStart
-                    android.util.Log.d("SmolLM", "✅ KV cache rebuilt in ${rebuildTime}ms")
+                    try {
+                        android.util.Log.d("SmolLM", "🔧 Executing deferred KV rebuild...")
+                        val rebuildStart = System.currentTimeMillis()
+                        llamaGPU.rebuildCacheWithSummary(summary, recentMessagesToKeep)
+                        val rebuildTime = System.currentTimeMillis() - rebuildStart
+                        android.util.Log.d("SmolLM", "✅ KV cache rebuilt in ${rebuildTime}ms")
+                    } catch (e: Exception) {
+                        android.util.Log.e("SmolLM", "❌ KV rebuild failed, clearing cache: ${e.message}")
+                        llamaGPU.clearChat()
+                        if (currentModel?.id?.contains("gemma") == false) {
+                            llamaGPU.addSystemPrompt("You are a helpful and intelligent AI assistant. Answer questions clearly and concisely.")
+                        }
+                    }
                     pendingKVRebuild = null
                 }
                 
@@ -1001,6 +1101,20 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     } catch (e: Exception) {
                         android.util.Log.w("SmolLM", "⚠️ RAG clearChat failed: ${e.message}")
                     }
+                }
+                
+                // Safety check: validate context before inference to prevent native crash
+                val currentContextUsed = try { llamaGPU.getContextLengthUsed() } catch (e: Exception) { 0 }
+                val queryTokenEstimate = estimateTokens(finalQuery)
+                val projectedUsage = currentContextUsed + queryTokenEstimate + 500 // +500 for response buffer
+                
+                if (projectedUsage > maxContextSize * 0.95) {
+                    android.util.Log.w("SmolLM", "⚠️ Context near limit: $currentContextUsed + ~$queryTokenEstimate > ${maxContextSize}. Clearing to prevent crash.")
+                    llamaGPU.clearChat()
+                    if (currentModel?.id?.contains("gemma") == false) {
+                        llamaGPU.addSystemPrompt("You are a helpful and intelligent AI assistant. Answer questions clearly and concisely.")
+                    }
+                    estimatedTokenCount = 50
                 }
                 
                 android.util.Log.d("SmolLM", "🤖 Starting LLM inference...")
@@ -1162,11 +1276,16 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         
         // Check for summarization AFTER the inference job completes
         inferenceJob?.invokeOnCompletion {
-            // Wait a bit for user to start reading, then summarize in background
+            // DISABLED: Background summarization causes native crashes in ggml_vec_dot
+            // The llama.cpp context appears to have thread-safety issues when reused
+            // for summarization shortly after inference completes.
+            // TODO: Investigate if this is a llama.cpp bug or requires longer delay
+            /*
             viewModelScope.launch {
                 kotlinx.coroutines.delay(2000) // Wait 2 seconds for user to start reading
                 summarizeLastExchange()
             }
+            */
             
             // Check if we need to rebuild KV cache
             checkAndTriggerSummarization()
@@ -1446,7 +1565,8 @@ Compressed summary:"""
         // Don't summarize if there's an active inference or already summarizing
         if (contextUsage >= 60 && !isSummarizing && inferenceJob?.isActive != true) {
             android.util.Log.d("SmolLM", "🎯 Context at $contextUsage%, triggering rolling summarization")
-            viewModelScope.launch {
+            summarizationJob?.cancel()
+            summarizationJob = viewModelScope.launch {
                 summarizeOldMessagesInBackground()
             }
         } else {

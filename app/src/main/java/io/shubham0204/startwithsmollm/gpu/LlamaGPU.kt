@@ -37,6 +37,8 @@ enum class KVCacheType(val ggmlType: Int) {
 class LlamaGPU {
     
     private var nativePtr: Long = 0
+    @Volatile private var isInferenceRunning = false
+    @Volatile private var shouldStopInference = false
     
     companion object {
         init {
@@ -164,15 +166,22 @@ class LlamaGPU {
      */
     fun getResponseAsFlow(query: String): Flow<String> = flow {
         verifyHandle()
-        startCompletion(nativePtr, query)
-        var piece = completionLoop(nativePtr)
-        while (piece != "[EOG]") {
-            if (piece.isNotEmpty()) {
-                emit(piece)
+        shouldStopInference = false
+        isInferenceRunning = true
+        try {
+            startCompletion(nativePtr, query)
+            var piece = completionLoop(nativePtr)
+            while (piece != "[EOG]" && !shouldStopInference) {
+                if (piece.isNotEmpty()) {
+                    emit(piece)
+                }
+                if (shouldStopInference) break
+                piece = completionLoop(nativePtr)
             }
-            piece = completionLoop(nativePtr)
+            stopCompletion(nativePtr)
+        } finally {
+            isInferenceRunning = false
         }
-        stopCompletion(nativePtr)
     }.flowOn(Dispatchers.IO)
     
     /**
@@ -180,15 +189,22 @@ class LlamaGPU {
      */
     fun getResponse(query: String): String {
         verifyHandle()
-        startCompletion(nativePtr, query)
-        val response = StringBuilder()
-        var piece = completionLoop(nativePtr)
-        while (piece != "[EOG]") {
-            response.append(piece)
-            piece = completionLoop(nativePtr)
+        shouldStopInference = false
+        isInferenceRunning = true
+        try {
+            startCompletion(nativePtr, query)
+            val response = StringBuilder()
+            var piece = completionLoop(nativePtr)
+            while (piece != "[EOG]" && !shouldStopInference) {
+                response.append(piece)
+                if (shouldStopInference) break
+                piece = completionLoop(nativePtr)
+            }
+            stopCompletion(nativePtr)
+            return response.toString()
+        } finally {
+            isInferenceRunning = false
         }
-        stopCompletion(nativePtr)
-        return response.toString()
     }
     
     /**
@@ -285,8 +301,70 @@ class LlamaGPU {
         removeOldestMessages(nativePtr, count)
     }
     
+    /**
+     * Check if inference is currently running
+     */
+    fun isRunning(): Boolean = isInferenceRunning
+    
+    /**
+     * Stop any ongoing inference. Call this before close() if inference might be running.
+     * This signals the native code to stop and waits for it to complete.
+     */
+    fun stopInference() {
+        shouldStopInference = true
+        if (nativePtr != 0L) {
+            try {
+                stopCompletion(nativePtr)
+            } catch (e: Exception) {
+                android.util.Log.w("LlamaGPU", "stopInference error: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * Stop inference and wait for it to actually stop (blocking)
+     * @param timeoutMs Maximum time to wait in milliseconds
+     * @return true if inference stopped, false if timeout
+     */
+    fun stopInferenceAndWait(timeoutMs: Long = 2000): Boolean {
+        shouldStopInference = true
+        if (nativePtr != 0L) {
+            try {
+                stopCompletion(nativePtr)
+            } catch (e: Exception) {
+                android.util.Log.w("LlamaGPU", "stopInference error: ${e.message}")
+            }
+        }
+        
+        // Wait for inference to actually stop
+        val startTime = System.currentTimeMillis()
+        while (isInferenceRunning && (System.currentTimeMillis() - startTime) < timeoutMs) {
+            Thread.sleep(50)
+        }
+        
+        return !isInferenceRunning
+    }
+    
     fun close() {
         if (nativePtr != 0L) {
+            // Signal stop and wait for inference to finish
+            shouldStopInference = true
+            try {
+                stopCompletion(nativePtr)
+            } catch (e: Exception) {
+                // Ignore - might not be running
+            }
+            
+            // Wait for inference to stop (max 1 second)
+            val startTime = System.currentTimeMillis()
+            while (isInferenceRunning && (System.currentTimeMillis() - startTime) < 1000) {
+                Thread.sleep(50)
+            }
+            
+            if (isInferenceRunning) {
+                android.util.Log.w("LlamaGPU", "Warning: closing while inference still running")
+            }
+            
             close(nativePtr)
             nativePtr = 0
         }
