@@ -47,6 +47,8 @@ import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -117,13 +119,9 @@ class MainActivity : ComponentActivity() {
                 val bluetoothClient = remember { BluetoothInferenceClient(context) }
                 val coroutineScope = rememberCoroutineScope()
                 
-                // Show toast when context is trimmed
-                LaunchedEffect(appState.chatState.toastMessage) {
-                    appState.chatState.toastMessage?.let { message ->
-                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-                        viewModel.onEvent(AppEvent.ClearToast)
-                    }
-                }
+                // Local toast state for ad-hoc messages (bluetooth errors, permissions)
+                var localToastMessage by remember { mutableStateOf<String?>(null) }
+                var localToastType by remember { mutableStateOf(io.shubham0204.startwithsmollm.ui.ToastType.INFO) }
                 
                 // Bluetooth device selection dialog
                 if (showBluetoothDialog) {
@@ -144,11 +142,8 @@ class MainActivity : ComponentActivity() {
                                     if (response.success) {
                                         viewModel.onEvent(AppEvent.ReceiveBluetoothResponse(response.text))
                                     } else {
-                                        Toast.makeText(
-                                            context,
-                                            "Bluetooth inference failed: ${response.errorMessage}",
-                                            Toast.LENGTH_LONG
-                                        ).show()
+                                        localToastMessage = "Bluetooth inference failed: ${response.errorMessage}"
+                                        localToastType = io.shubham0204.startwithsmollm.ui.ToastType.ERROR
                                     }
                                 }
                             }
@@ -164,6 +159,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 
+                androidx.compose.foundation.layout.Box(modifier = androidx.compose.ui.Modifier.fillMaxSize()) {
                 AnimatedContent(
                     targetState = appState.currentScreen,
                     transitionSpec = {
@@ -314,6 +310,22 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                
+                // Themed toast overlay (covers all screens)
+                io.shubham0204.startwithsmollm.ui.AppToastHost(
+                    message = appState.chatState.toastMessage ?: localToastMessage,
+                    type = if (appState.chatState.toastMessage != null)
+                        io.shubham0204.startwithsmollm.ui.ToastType.INFO
+                    else localToastType,
+                    onDismiss = {
+                        if (appState.chatState.toastMessage != null) {
+                            viewModel.onEvent(AppEvent.ClearToast)
+                        } else {
+                            localToastMessage = null
+                        }
+                    }
+                )
+                } // end Box
             }
         }
     }
@@ -350,9 +362,10 @@ class MainActivity : ComponentActivity() {
             )
             return
         }
+        var showOverflowMenu by remember { mutableStateOf(false) }
         Scaffold(
             topBar = {
-                CenterAlignedTopAppBar(
+                androidx.compose.material3.TopAppBar(
                     navigationIcon = {
                         IconButton(onClick = onBackClick) {
                             Icon(
@@ -363,50 +376,54 @@ class MainActivity : ComponentActivity() {
                     },
                     title = {
                         Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier.clickable { onModelNameTap() }
                         ) {
                             Text(
                                 text = uiState.currentModelName.ifEmpty { "AI Assistant" },
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.SemiBold
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1
                             )
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
+                                // Status dot
+                                val statusColor = when {
+                                    uiState.modelLoadingState == ModelLoadingState.LOADING -> androidx.compose.ui.graphics.Color(0xFFFFA726)
+                                    uiState.modelLoadingState == ModelLoadingState.FAILURE -> MaterialTheme.colorScheme.error
+                                    uiState.contextUsagePercent >= 80 -> MaterialTheme.colorScheme.error
+                                    uiState.modelLoadingState == ModelLoadingState.SUCCESS -> androidx.compose.ui.graphics.Color(0xFF43A047)
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .background(statusColor, androidx.compose.foundation.shape.CircleShape)
+                                )
                                 Text(
                                     text = when (uiState.modelLoadingState) {
-                                        ModelLoadingState.LOADING -> "Loading model..."
-                                        ModelLoadingState.SUCCESS -> {
-                                            val ragStatus = if (uiState.ragEnabled) " • RAG" else ""
-                                            "Context: ${uiState.contextUsagePercent}%$ragStatus"
-                                        }
-                                        ModelLoadingState.FAILURE -> "Failed to load"
-                                        ModelLoadingState.NOT_LOADED -> "Initializing..."
+                                        ModelLoadingState.LOADING -> "Loading…"
+                                        ModelLoadingState.SUCCESS -> "${uiState.contextUsagePercent}% context"
+                                        ModelLoadingState.FAILURE -> "Failed"
+                                        ModelLoadingState.NOT_LOADED -> "Initializing…"
                                     },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (uiState.contextUsagePercent >= 80) {
-                                        MaterialTheme.colorScheme.error
-                                    } else if (uiState.ragEnabled) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    }
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
                     },
                     actions = {
-                        // RAG button (always visible)
+                        // RAG button — kept visible because badge shows doc count
                         IconButton(onClick = onRagClick) {
                             Box {
                                 Icon(
                                     imageVector = Icons.Default.FolderOpen,
                                     contentDescription = "Knowledge Base",
-                                    tint = if (uiState.ragEnabled) 
-                                        MaterialTheme.colorScheme.primary 
-                                    else 
+                                    tint = if (uiState.ragEnabled)
+                                        MaterialTheme.colorScheme.primary
+                                    else
                                         MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 if (ragDocumentCount > 0) {
@@ -419,43 +436,75 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         
-                        // Benchmark button (always visible)
-                        IconButton(onClick = onBenchmarkClick) {
-                            Icon(
-                                imageVector = Icons.Default.Speed,
-                                contentDescription = "Benchmark",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        
-                        // Bluetooth inference button
-                        IconButton(onClick = onBluetoothClick) {
-                            Icon(
-                                imageVector = Icons.Default.Bluetooth,
-                                contentDescription = "Bluetooth Inference",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        
-                        // Expert mode - single ⚡ button for Inference Insights + Performance
-                        if (isExpertMode) {
-                            IconButton(onClick = { showInferenceInsights = true }) {
-                                Text("⚡", style = MaterialTheme.typography.titleLarge)
-                            }
-                        }
-                        
-                        // Clear chat button
-                        if (uiState.messages.isNotEmpty()) {
-                            IconButton(onClick = onClearChat) {
+                        // Overflow menu for everything else
+                        Box {
+                            IconButton(onClick = { showOverflowMenu = true }) {
                                 Icon(
-                                    imageVector = Icons.Default.Delete,
-                                    contentDescription = "Clear Chat",
+                                    imageVector = Icons.Default.MoreVert,
+                                    contentDescription = "More options",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
+                            androidx.compose.material3.DropdownMenu(
+                                expanded = showOverflowMenu,
+                                onDismissRequest = { showOverflowMenu = false }
+                            ) {
+                                androidx.compose.material3.DropdownMenuItem(
+                                    text = { Text("Benchmark") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Speed, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        onBenchmarkClick()
+                                    }
+                                )
+                                androidx.compose.material3.DropdownMenuItem(
+                                    text = { Text("Bluetooth inference") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Bluetooth, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        onBluetoothClick()
+                                    }
+                                )
+                                if (isExpertMode) {
+                                    androidx.compose.material3.DropdownMenuItem(
+                                        text = { Text("Inference insights") },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.Star,
+                                                contentDescription = null
+                                            )
+                                        },
+                                        onClick = {
+                                            showOverflowMenu = false
+                                            showInferenceInsights = true
+                                        }
+                                    )
+                                }
+                                if (uiState.messages.isNotEmpty()) {
+                                    androidx.compose.material3.HorizontalDivider()
+                                    androidx.compose.material3.DropdownMenuItem(
+                                        text = { Text("Clear chat", color = MaterialTheme.colorScheme.error) },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.Delete,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.error
+                                            )
+                                        },
+                                        onClick = {
+                                            showOverflowMenu = false
+                                            onClearChat()
+                                        }
+                                    )
+                                }
+                            }
                         }
                     },
-                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.background,
                         titleContentColor = MaterialTheme.colorScheme.onSurface
                     )
