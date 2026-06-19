@@ -80,6 +80,7 @@ import io.shubham0204.startwithsmollm.ui.InferenceInsightsScreen
 import io.shubham0204.startwithsmollm.ui.MarkdownText
 import io.shubham0204.startwithsmollm.ui.ModelSelectionScreen
 import io.shubham0204.startwithsmollm.ui.RagScreen
+import io.shubham0204.startwithsmollm.ui.RagBenchmarkScreen
 import io.shubham0204.startwithsmollm.ui.theme.SmolLMStarterTemplateTheme
 import io.shubham0204.startwithsmollm.voice.VoiceManager
 import io.shubham0204.startwithsmollm.data.ExpertMode
@@ -281,7 +282,24 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onBack = {
                                     viewModel.onEvent(AppEvent.BackFromRag)
+                                },
+                                onOpenBenchmark = {
+                                    viewModel.onEvent(AppEvent.OpenRagBenchmark)
                                 }
+                            )
+                        }
+                        AppScreen.RAG_BENCHMARK -> {
+                            BackHandler {
+                                viewModel.onEvent(AppEvent.BackFromRagBenchmark)
+                            }
+                            val ragBenchmarkState by viewModel.ragBenchmarkState.collectAsState()
+                            RagBenchmarkScreen(
+                                state = ragBenchmarkState,
+                                onPickUri = { uri ->
+                                    viewModel.onEvent(AppEvent.PickRagBenchmarkUri(uri))
+                                },
+                                onStart = { viewModel.onEvent(AppEvent.StartRagBenchmark) },
+                                onBack = { viewModel.onEvent(AppEvent.BackFromRagBenchmark) }
                             )
                         }
                         AppScreen.PERFORMANCE_DASHBOARD -> {

@@ -504,36 +504,41 @@ class TableExtractor {
         val confidence: Float = 0.7f  // Confidence score (0-1)
     ) {
         fun toChunkText(): String {
-            val tableType = if (confidence >= 0.9f) "Bordered Table" else "Space-Aligned Table"
             val captionText = if (!caption.isNullOrBlank()) {
-                "**$caption**\n\n"
+                "$caption\n\n"
             } else {
-                "**Table from Page $pageNumber**\n\n"
+                "Table (Page $pageNumber):\n\n"
             }
             
+            // Create a clean, embedding-friendly representation
+            // Include both markdown table AND a linearized text version for better retrieval
+            val linearized = getLinearizedText()
+            
             return """
-                |📊 **STRUCTURED TABLE DATA** 📊
-                |
-                |$captionText**Type:** $tableType
-                |**Dimensions:** ${rowCount} rows × $columnCount columns
-                |**Page:** $pageNumber
-                |**Confidence:** ${String.format("%.0f%%", confidence * 100)}
-                |
-                |⚠️ **IMPORTANT:** This is a TABLE with structured data. Read carefully:
-                |• Each row represents a separate entry
-                |• Each column represents a specific category/metric
-                |• Numbers in cells are exact values, not approximations
-                |• Column headers define what each column contains
-                |• Do NOT confuse row labels with column labels
-                |
-                |**TABLE CONTENT:**
-                |
+                |[TABLE DATA - ${rowCount} rows × $columnCount columns]
+                |$captionText
                 |$markdown
                 |
-                |---
-                |*Table Source: Page $pageNumber | ${rowCount} rows × $columnCount columns*
-                |
+                |Summary: $linearized
             """.trimMargin()
+        }
+        
+        /**
+         * Get a linearized text representation of the table for better embedding/retrieval
+         * Converts "| Name | Age |" rows to "Name: [value], Age: [value]" format
+         */
+        private fun getLinearizedText(): String {
+            val lines = markdown.lines().filter { it.contains("|") && !it.contains("---") }
+            if (lines.size < 2) return rawText.take(200)
+            
+            val headers = lines.first().split("|").map { it.trim() }.filter { it.isNotEmpty() }
+            val dataRows = lines.drop(1)
+            
+            return dataRows.take(5).mapIndexed { idx, row ->
+                val cells = row.split("|").map { it.trim() }.filter { it.isNotEmpty() }
+                val pairs = headers.zip(cells).joinToString(", ") { (h, c) -> "$h: $c" }
+                "Row ${idx + 1}: $pairs"
+            }.joinToString(". ") + if (dataRows.size > 5) ". (${dataRows.size - 5} more rows)" else ""
         }
     }
 }

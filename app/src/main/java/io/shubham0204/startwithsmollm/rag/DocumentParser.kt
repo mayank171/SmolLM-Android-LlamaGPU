@@ -21,6 +21,10 @@ class DocumentParser(private val context: Context) {
         private const val TAG = "DocumentParser"
         private var pdfBoxInitialized = false
         private const val MIN_CHARS_PER_PAGE = 100  // Below this, consider PDF as scanned
+        
+        // Pattern to detect fragmented table rows (e.g., "Week \n 4 \n Git &")
+        private val WEEK_PATTERN = Regex("""Week\s*\n\s*(\d+)\s*\n""")
+        private val MONTH_PATTERN = Regex("""MONTH\s+(\d+)""")
     }
     
     private val imageTextExtractor = ImageTextExtractor(context)
@@ -217,16 +221,36 @@ class DocumentParser(private val context: Context) {
             val pageCount = document.numberOfPages
             Log.d(TAG, "   Page count: $pageCount")
             
-            // Extract text
+            // Extract text page by page for better table detection
             val stripper = PDFTextStripper().apply {
                 sortByPosition = true
             }
-            val text = stripper.getText(document)
             
-            // Extract tables
+            val allTables = mutableListOf<TableExtractor.ExtractedTable>()
+            val fullTextBuilder = StringBuilder()
+            
+            // Process each page separately for better table detection
+            for (pageNum in 1..pageCount) {
+                stripper.startPage = pageNum
+                stripper.endPage = pageNum
+                val pageText = stripper.getText(document)
+                fullTextBuilder.append(pageText)
+                
+                // Extract tables from this page
+                val pageTables = tableExtractor.detectSimpleTables(pageText, pageNum)
+                allTables.addAll(pageTables)
+            }
+            
+            var text = fullTextBuilder.toString()
+            
+            // Preprocess text to reconstruct fragmented table rows
+            text = reconstructTableRows(text)
+            Log.d(TAG, "   Text after reconstruction: ${text.length} chars")
+            
+            val tables = allTables
+            
             Log.d(TAG, "   Extracting tables...")
-            val tables = tableExtractor.detectSimpleTables(text, 1)
-            Log.d(TAG, "   Found ${tables.size} tables")
+            Log.d(TAG, "   Found ${tables.size} tables across $pageCount pages")
             
             // Extract images
             Log.d(TAG, "   Extracting images...")
@@ -329,6 +353,40 @@ class DocumentParser(private val context: Context) {
             "jpg", "jpeg", "png", "webp", "bmp" -> DocumentType.IMAGE
             else -> DocumentType.UNKNOWN
         }
+    }
+    
+    /**
+     * Reconstruct fragmented table rows from PDF text extraction
+     * PDFs often split table cells across multiple lines, e.g.:
+     * "Week \n 4 \n Git & \n Collaboration" -> "Week 4: Git & Collaboration"
+     */
+    private fun reconstructTableRows(text: String): String {
+        var result = text
+        
+        // Fix "Week \n X" patterns -> "Week X:"
+        // This handles PDFs where table cells are split across lines
+        result = result.replace(Regex("""Week\s*\n\s*(\d+)\s*\n""")) { match ->
+            val weekNum = match.groupValues[1]
+            "\n\nWeek $weekNum: "
+        }
+        
+        // Fix fragmented focus areas that follow week numbers
+        // Pattern: short line followed by newline followed by continuation
+        // e.g., "Git & \n Collaboration" -> "Git & Collaboration"
+        result = result.replace(Regex("""([A-Za-z&])\s*\n\s*([A-Z][a-z]+)\s*\n""")) { match ->
+            "${match.groupValues[1]} ${match.groupValues[2]} - "
+        }
+        
+        // Consolidate multiple newlines into paragraph breaks
+        result = result.replace(Regex("""\n{3,}"""), "\n\n")
+        
+        // Fix "Build / Output" column fragments - join lowercase words split by newlines
+        result = result.replace(Regex("""([a-z,])\s*\n\s*([a-z])""")) { match ->
+            "${match.groupValues[1]} ${match.groupValues[2]}"
+        }
+        
+        Log.d(TAG, "   Reconstructed table rows in text")
+        return result
     }
     
     sealed class ParseResult {

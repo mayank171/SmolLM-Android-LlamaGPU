@@ -15,8 +15,11 @@ import io.shubham0204.startwithsmollm.data.ModelDownloadManager
 import io.shubham0204.startwithsmollm.data.ModelInfo
 import io.shubham0204.startwithsmollm.ui.ModelSelectionUiState
 import io.shubham0204.startwithsmollm.ui.InferenceMetrics
+import io.shubham0204.startwithsmollm.ui.RagBenchmarkUiState
+import io.shubham0204.startwithsmollm.benchmark.RagBenchmarkRunner
 import io.shubham0204.startwithsmollm.data.ExpertMode
 import io.shubham0204.startwithsmollm.rag.Document
+import io.shubham0204.startwithsmollm.rag.RagConfig
 import io.shubham0204.startwithsmollm.rag.RagEngine
 import io.shubham0204.startwithsmollm.rag.profiling.Profiler
 import io.shubham0204.startwithsmollm.voice.VoiceManager
@@ -67,6 +70,7 @@ enum class AppScreen {
     CHAT,
     BENCHMARK,
     RAG,
+    RAG_BENCHMARK,
     PERFORMANCE_DASHBOARD
 }
 
@@ -114,11 +118,27 @@ sealed interface AppEvent {
     // Performance dashboard events
     data object OpenPerformanceDashboard : AppEvent
     data object BackFromPerformanceDashboard : AppEvent
+    // RAG benchmark events
+    data object OpenRagBenchmark : AppEvent
+    data object BackFromRagBenchmark : AppEvent
+    data class PickRagBenchmarkUri(val uri: Uri) : AppEvent
+    data object StartRagBenchmark : AppEvent
     // Bluetooth events
     data class ReceiveBluetoothResponse(val response: String) : AppEvent
 }
 
 class MainActivityViewModel(application: Application) : AndroidViewModel(application) {
+
+    companion object {
+        // System prompt used when RAG mode is active. Each RAG query is treated as
+        // an independent factual QA against the retrieved context, so we clear the
+        // KV cache between queries and re-apply this prompt (mirrors the benchmark).
+        private const val RAG_SYSTEM_PROMPT =
+            "You are a factual QA assistant. Use ONLY the provided context to answer. " +
+            "If the answer is not in the context, say 'Not in context.' " +
+            "Be concise (1-3 sentences). Quote specific numbers and terms exactly as they appear in the context. " +
+            "Do not invent acronyms, numbers, or facts. Do not repeat yourself."
+    }
 
     private val downloadManager = ModelDownloadManager(application)
     private val deviceProfile: DeviceProfile = DeviceCapabilities.getDeviceProfile(application)
@@ -236,6 +256,11 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             // Performance dashboard events
             is AppEvent.OpenPerformanceDashboard -> openPerformanceDashboard()
             is AppEvent.BackFromPerformanceDashboard -> backFromPerformanceDashboard()
+            // RAG benchmark
+            is AppEvent.OpenRagBenchmark -> openRagBenchmark()
+            is AppEvent.BackFromRagBenchmark -> backFromRagBenchmark()
+            is AppEvent.PickRagBenchmarkUri -> pickRagBenchmarkUri(event.uri)
+            is AppEvent.StartRagBenchmark -> startRagBenchmark()
             // Bluetooth events
             is AppEvent.ReceiveBluetoothResponse -> receiveBluetoothResponse(event.response)
         }
@@ -596,6 +621,112 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             state.copy(currentScreen = AppScreen.CHAT)
         }
     }
+
+    // ----- RAG Benchmark ---------------------------------------------------
+    private val _ragBenchmarkState = MutableStateFlow(RagBenchmarkUiState())
+    val ragBenchmarkState: StateFlow<RagBenchmarkUiState> = _ragBenchmarkState
+    private var ragBenchmarkJob: Job? = null
+
+    private fun openRagBenchmark() {
+        _appStateFlow.update { it.copy(currentScreen = AppScreen.RAG_BENCHMARK) }
+    }
+
+    private fun backFromRagBenchmark() {
+        if (_ragBenchmarkState.value.isRunning) {
+            android.util.Log.d("SmolLM", "⏹ Cancelling RAG benchmark")
+            ragBenchmarkJob?.cancel()
+        }
+        _appStateFlow.update {
+            it.copy(currentScreen = AppScreen.RAG)
+        }
+    }
+
+    private fun pickRagBenchmarkUri(uri: Uri) {
+        _ragBenchmarkState.update { it.copy(pickedUri = uri, error = null) }
+    }
+
+    private fun startRagBenchmark() {
+        val uri = _ragBenchmarkState.value.pickedUri
+        if (uri == null) {
+            _ragBenchmarkState.update { it.copy(error = "Pick a PDF first.") }
+            return
+        }
+        if (_ragBenchmarkState.value.isRunning) return
+
+        // Free the main model & summarizer so the benchmark has full RAM/GPU access.
+        try {
+            llamaGPU.close()
+            summarizerGPU?.let { try { it.close() } catch (_: Exception) {} }
+            summarizerGPU = null
+            android.util.Log.d("SmolLM", "🔧 Closed main model(s) before RAG benchmark")
+        } catch (e: Exception) {
+            android.util.Log.w("SmolLM", "Close before benchmark failed: ${e.message}")
+        }
+        _appStateFlow.update {
+            it.copy(chatState = it.chatState.copy(modelLoadingState = ModelLoadingState.NOT_LOADED))
+        }
+
+        _ragBenchmarkState.update {
+            RagBenchmarkUiState(
+                isRunning = true,
+                status = "Starting...",
+                logLines = emptyList(),
+                pickedUri = uri
+            )
+        }
+
+        val runner = RagBenchmarkRunner(getApplication())
+        ragBenchmarkJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                runner.run(uri, ragEngine).collect { upd ->
+                    when (upd) {
+                        is RagBenchmarkRunner.BenchmarkUpdate.Log ->
+                            _ragBenchmarkState.update { s -> s.copy(logLines = s.logLines + upd.line) }
+                        is RagBenchmarkRunner.BenchmarkUpdate.Status ->
+                            _ragBenchmarkState.update { s -> s.copy(status = upd.message) }
+                        is RagBenchmarkRunner.BenchmarkUpdate.ModelStarted ->
+                            _ragBenchmarkState.update { s ->
+                                s.copy(
+                                    status = "Model ${upd.index}/${upd.total}: ${upd.modelName}",
+                                    currentModelIdx = upd.index,
+                                    totalModels = upd.total,
+                                    currentQuestionIdx = 0
+                                )
+                            }
+                        is RagBenchmarkRunner.BenchmarkUpdate.QuestionStarted ->
+                            _ragBenchmarkState.update { s ->
+                                s.copy(
+                                    status = "Q${upd.index}/${upd.total}: ${upd.qid}",
+                                    currentQuestionIdx = upd.index,
+                                    totalQuestions = upd.total
+                                )
+                            }
+                        is RagBenchmarkRunner.BenchmarkUpdate.QuestionFinished -> { /* aggregated in ModelFinished */ }
+                        is RagBenchmarkRunner.BenchmarkUpdate.ModelFinished ->
+                            _ragBenchmarkState.update { s -> s.copy(modelResults = s.modelResults + upd.result) }
+                        is RagBenchmarkRunner.BenchmarkUpdate.Done ->
+                            _ragBenchmarkState.update { s ->
+                                s.copy(
+                                    isRunning = false,
+                                    status = "Done. ${upd.results.size} models benchmarked.",
+                                    reportPath = upd.reportPath,
+                                    modelResults = upd.results
+                                )
+                            }
+                        is RagBenchmarkRunner.BenchmarkUpdate.Failed ->
+                            _ragBenchmarkState.update { s ->
+                                s.copy(isRunning = false, status = "Failed", error = upd.message)
+                            }
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SmolLM", "RAG benchmark crashed", e)
+                _ragBenchmarkState.update {
+                    it.copy(isRunning = false, status = "Failed", error = e.message ?: "unknown")
+                }
+            }
+        }
+    }
     
     private fun addDocument(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -765,6 +896,15 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     val ragTime = System.currentTimeMillis() - ragStartTime
                     android.util.Log.d("SmolLM", "✅ RAG: Found ${ragResult.retrievedChunks.size} relevant chunks in ${ragTime}ms")
                     citations = ragResult.citations
+                    
+                    // DEBUG: Log prompt size (critical for understanding slow inference)
+                    val promptChars = ragResult.augmentedPrompt.length
+                    val estimatedTokens = promptChars / 4  // ~4 chars per token
+                    android.util.Log.d("SmolLM", "📏 RAG PROMPT SIZE: $promptChars chars (~$estimatedTokens tokens)")
+                    if (estimatedTokens > 500) {
+                        android.util.Log.w("SmolLM", "⚠️ LARGE PROMPT WARNING: ${estimatedTokens} tokens may cause slow prefill!")
+                    }
+                    
                     ragResult.augmentedPrompt
                 } else {
                     android.util.Log.d("SmolLM", "⏭️ RAG disabled or no documents")
@@ -827,6 +967,23 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     val rebuildTime = System.currentTimeMillis() - rebuildStart
                     android.util.Log.d("SmolLM", "✅ KV cache rebuilt in ${rebuildTime}ms")
                     pendingKVRebuild = null
+                }
+                
+                // RAG mode: each query is independent. Clear the KV cache and re-apply
+                // the RAG system prompt to prevent context overflow across queries.
+                // (Mirrors the approach proven in RagBenchmarkRunner.)
+                if (ragEnabled && ragEngine.hasDocuments()) {
+                    try {
+                        android.util.Log.d("SmolLM", "🧹 RAG mode: clearing KV cache for independent query")
+                        llamaGPU.clearChat()
+                        if (currentModel?.id?.contains("gemma") == false) {
+                            llamaGPU.addSystemPrompt(RAG_SYSTEM_PROMPT)
+                        }
+                        // Reset accounting so context-usage UI reflects fresh state
+                        estimatedTokenCount = 50
+                    } catch (e: Exception) {
+                        android.util.Log.w("SmolLM", "⚠️ RAG clearChat failed: ${e.message}")
+                    }
                 }
                 
                 android.util.Log.d("SmolLM", "🤖 Starting LLM inference...")
@@ -1445,6 +1602,13 @@ One sentence summary:"""
                 android.util.Log.d("SmolLM-8K-TEST", "RAM after load: ${ramAfterLoadMB}MB (+${ramIncreaseMB}MB)")
                 android.util.Log.d("SmolLM-8K-TEST", "Context size: $safeContextSize tokens")
                 android.util.Log.d("SmolLM-8K-TEST", "Estimated KV cache: ~${(safeContextSize * 0.054).toInt()}MB (Q8_0)")
+                
+                // Update RAG config based on model size for optimal performance
+                val ragConfig = RagConfig.forModel(model.parameters, safeContextSize.toInt())
+                ragEngine.updateConfig(ragConfig)
+                android.util.Log.d("SmolLM", "📚 RAG config updated for ${model.parameters} model:")
+                android.util.Log.d("SmolLM", "   - Chunk size: ${ragConfig.chunkSize}, TopK: ${ragConfig.topK}, FinalTopK: ${ragConfig.finalTopK}")
+                android.util.Log.d("SmolLM", "   - Similarity threshold: ${ragConfig.similarityThreshold}")
                 
                 // Load secondary summarizer model for large models (>1GB)
                 val modelSizeMB = model.sizeInMB
