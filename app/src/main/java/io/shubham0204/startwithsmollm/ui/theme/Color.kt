@@ -2,25 +2,24 @@ package io.shubham0204.startwithsmollm.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// ===== Brand palette derived from the app icon gradient =====
-// Icon gradient: Indigo #6366F1 → Violet #8B5CF6 → Purple #A855F7
-// Warm-neutral surfaces preserved for readability; brand accents drive primary/secondary/tertiary.
+// ===== Subtle, muted palette =====
+// Quiet slate-indigo accents — no bright purples. Backgrounds preserved as before.
 
 // --- Light scheme ---
-val LightPrimary = Color(0xFF6366F1)          // indigo-500 (icon start)
+val LightPrimary = Color(0xFF4F5D75)          // muted slate-indigo
 val LightOnPrimary = Color(0xFFFFFFFF)
-val LightPrimaryContainer = Color(0xFFE0E1FD) // soft indigo tint
-val LightOnPrimaryContainer = Color(0xFF1E1B5C)
+val LightPrimaryContainer = Color(0xFFE6E9EF) // very soft slate tint
+val LightOnPrimaryContainer = Color(0xFF2A3142)
 
-val LightSecondary = Color(0xFF8B5CF6)        // violet-500 (icon mid)
+val LightSecondary = Color(0xFF6B7280)        // neutral gray
 val LightOnSecondary = Color(0xFFFFFFFF)
-val LightSecondaryContainer = Color(0xFFEDE4FE)
-val LightOnSecondaryContainer = Color(0xFF2E1065)
+val LightSecondaryContainer = Color(0xFFEDEEF1)
+val LightOnSecondaryContainer = Color(0xFF374151)
 
-val LightTertiary = Color(0xFFA855F7)         // purple-500 (icon end)
+val LightTertiary = Color(0xFF7B8CA8)         // dusty blue-gray
 val LightOnTertiary = Color(0xFFFFFFFF)
-val LightTertiaryContainer = Color(0xFFF3E4FE)
-val LightOnTertiaryContainer = Color(0xFF3B0764)
+val LightTertiaryContainer = Color(0xFFEAEEF3)
+val LightOnTertiaryContainer = Color(0xFF334155)
 
 val LightError = Color(0xFFB42318)
 val LightOnError = Color(0xFFFFFFFF)
@@ -40,20 +39,20 @@ val LightSurfaceContainer = Color(0xFFF1EFEB) // bubble background
 val LightSurfaceContainerHigh = Color(0xFFE9E7E2) // input pill
 
 // --- Dark scheme ---
-val DarkPrimary = Color(0xFFA5A6F6)            // lifted indigo for dark surfaces
-val DarkOnPrimary = Color(0xFF1E1B5C)
-val DarkPrimaryContainer = Color(0xFF3730A3)
-val DarkOnPrimaryContainer = Color(0xFFE0E1FD)
+val DarkPrimary = Color(0xFFB8BFCC)            // soft slate, easy on the eyes
+val DarkOnPrimary = Color(0xFF1F2530)
+val DarkPrimaryContainer = Color(0xFF2A3142)
+val DarkOnPrimaryContainer = Color(0xFFE6E9EF)
 
-val DarkSecondary = Color(0xFFC4B5FD)          // lifted violet
-val DarkOnSecondary = Color(0xFF2E1065)
-val DarkSecondaryContainer = Color(0xFF5B21B6)
-val DarkOnSecondaryContainer = Color(0xFFEDE4FE)
+val DarkSecondary = Color(0xFF9CA3AF)          // muted gray
+val DarkOnSecondary = Color(0xFF1F2937)
+val DarkSecondaryContainer = Color(0xFF2E343F)
+val DarkOnSecondaryContainer = Color(0xFFE5E7EB)
 
-val DarkTertiary = Color(0xFFD8B4FE)           // lifted purple
-val DarkOnTertiary = Color(0xFF3B0764)
-val DarkTertiaryContainer = Color(0xFF7E22CE)
-val DarkOnTertiaryContainer = Color(0xFFF3E4FE)
+val DarkTertiary = Color(0xFFA8B4C8)           // dusty blue-gray
+val DarkOnTertiary = Color(0xFF1F2937)
+val DarkTertiaryContainer = Color(0xFF323A4A)
+val DarkOnTertiaryContainer = Color(0xFFE3E7EF)
 
 val DarkError = Color(0xFFFCA5A5)
 val DarkOnError = Color(0xFF5A0F0A)
