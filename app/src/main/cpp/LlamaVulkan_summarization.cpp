@@ -144,6 +144,7 @@ void LlamaVulkan::rebuildCacheWithSummary(const char* summary, int keepRecentN) 
     common_chat_templates_inputs inputs;
     inputs.use_jinja = true;
     inputs.messages = messages;
+    inputs.add_generation_prompt = true;  // Ready for next generation
     auto templates = common_chat_templates_init(_model, _chatTemplate);
     std::string fullPrompt = common_chat_templates_apply(templates.get(), inputs).prompt;
     

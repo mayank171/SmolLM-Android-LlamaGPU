@@ -716,7 +716,9 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         tokensPerSecond: Float,
         contextUsed: Int,
         ramUsedMB: Int,
-        avgItlMs: Float
+        avgItlMs: Float,
+        promptCacheUsed: Boolean = false,
+        promptCacheRestoreMs: Long = 0
     ) {
         val contextPercent = ((contextUsed.toFloat() / maxContextSize) * 100).toInt()
         
@@ -744,7 +746,9 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             kvCacheMB = kvCacheMB,
             avgItlMs = avgItlMs,
             prefillTimeMs = ttftMs,
-            decodeTimeMs = totalTimeMs - ttftMs
+            decodeTimeMs = totalTimeMs - ttftMs,
+            promptCacheUsed = promptCacheUsed,
+            promptCacheRestoreMs = promptCacheRestoreMs
         )
     }
 
@@ -1263,6 +1267,10 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 var tokenCount = 0
                 val responseBuilder = StringBuilder()
                 
+                // Track prompt cache usage for metrics
+                var promptCacheUsed = false
+                var promptCacheRestoreMs = 0L
+                
                 // Track RAM before inference
                 val runtime = Runtime.getRuntime()
                 val ramBeforeMB = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
@@ -1322,18 +1330,39 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     pendingKVRebuild = null
                 }
                 
-                // RAG mode: each query is independent. Clear the KV cache and re-apply
-                // the RAG system prompt to prevent context overflow across queries.
-                // (Mirrors the approach proven in RagBenchmarkRunner.)
+                // RAG mode: each query is independent. Use prompt caching to avoid
+                // re-encoding the system prompt every time (saves 500-2000ms TTFT).
                 if (ragEnabled && ragEngine.hasDocuments()) {
                     try {
-                        android.util.Log.d("SmolLM", "🧹 RAG mode: clearing KV cache for independent query")
-                        llamaGPU.clearChat()
-                        if (currentModel?.id?.contains("gemma") == false) {
-                            llamaGPU.addSystemPrompt(RAG_SYSTEM_PROMPT)
+                        val isGemma = currentModel?.id?.contains("gemma") == true
+                        
+                        // Try to restore from system prompt cache first (fast path)
+                        if (!isGemma && llamaGPU.hasSystemPromptCache()) {
+                            val cacheRestoreStart = System.currentTimeMillis()
+                            val restored = llamaGPU.restoreSystemPromptCache()
+                            val cacheRestoreTime = System.currentTimeMillis() - cacheRestoreStart
+                            
+                            if (restored) {
+                                android.util.Log.d("SmolLM", "⚡ RAG: Restored system prompt cache in ${cacheRestoreTime}ms (saved ~1-2s TTFT)")
+                                estimatedTokenCount = llamaGPU.getSystemPromptCacheSize()
+                                promptCacheUsed = true
+                                promptCacheRestoreMs = cacheRestoreTime
+                            } else {
+                                // Cache restore failed, fall back to full clear
+                                android.util.Log.w("SmolLM", "⚠️ Cache restore failed, using full clear")
+                                llamaGPU.clearChat()
+                                llamaGPU.addSystemPrompt(RAG_SYSTEM_PROMPT)
+                                estimatedTokenCount = 50
+                            }
+                        } else {
+                            // No cache yet or Gemma model - do full clear and setup
+                            android.util.Log.d("SmolLM", "🧹 RAG mode: clearing KV cache for independent query")
+                            llamaGPU.clearChat()
+                            if (!isGemma) {
+                                llamaGPU.addSystemPrompt(RAG_SYSTEM_PROMPT)
+                            }
+                            estimatedTokenCount = 50
                         }
-                        // Reset accounting so context-usage UI reflects fresh state
-                        estimatedTokenCount = 50
                     } catch (e: Exception) {
                         android.util.Log.w("SmolLM", "⚠️ RAG clearChat failed: ${e.message}")
                     }
@@ -1433,6 +1462,28 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                 profiler?.recordCustomMetric("LLM", "battery_per_1k_tokens", batteryPer1000Tokens.toDouble())
                 profiler?.recordCustomMetric("LLM", "total_tokens", tokenCount.toDouble())
                 
+                // Cache system prompt for future RAG queries (if not already cached)
+                // This is done after first successful RAG inference to capture the encoded system prompt
+                if (ragEnabled && ragEngine.hasDocuments() && !llamaGPU.hasSystemPromptCache()) {
+                    val isGemma = currentModel?.id?.contains("gemma") == true
+                    if (!isGemma) {
+                        try {
+                            // Clear and re-add system prompt to get clean cache
+                            llamaGPU.clearChat()
+                            llamaGPU.addSystemPrompt(RAG_SYSTEM_PROMPT)
+                            // Run a minimal completion to populate KV cache
+                            llamaGPU.getResponse("Hi")
+                            // Now cache the system prompt state
+                            val cached = llamaGPU.cacheSystemPrompt()
+                            if (cached) {
+                                android.util.Log.d("SmolLM", "✅ System prompt cached for future RAG queries (${llamaGPU.getSystemPromptCacheSize()} tokens)")
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.w("SmolLM", "⚠️ Failed to cache system prompt: ${e.message}")
+                        }
+                    }
+                }
+                
                 // Add tokens for assistant response
                 estimatedTokenCount += tokenCount
                 
@@ -1445,7 +1496,9 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     tokensPerSecond = tokensPerSecond.toFloat(),
                     contextUsed = contextUsed,
                     ramUsedMB = ramUsedMB.toInt(),
-                    avgItlMs = avgItl.toFloat()
+                    avgItlMs = avgItl.toFloat(),
+                    promptCacheUsed = promptCacheUsed,
+                    promptCacheRestoreMs = promptCacheRestoreMs
                 )
                 
                 // Don't auto-speak - user can click speak button on message
@@ -1913,6 +1966,16 @@ One sentence summary:"""
     private fun loadModel(model: ModelInfo) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                // Clear system prompt cache from previous model (if any)
+                try {
+                    if (llamaGPU.hasSystemPromptCache()) {
+                        llamaGPU.clearSystemPromptCache()
+                        android.util.Log.d("SmolLM", "🧹 Cleared system prompt cache from previous model")
+                    }
+                } catch (e: Exception) {
+                    // Ignore - model might not be loaded yet
+                }
+                
                 val reader = GGUFReader()
                 reader.load(currentModelPath)
                 val chatTemplate = reader.getChatTemplate()

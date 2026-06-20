@@ -573,6 +573,11 @@ class MainActivity : ComponentActivity() {
                 }
             } else {
                 // AI response - modern bubble with speak button
+                // Don't render empty bubble during loading (ThinkingIndicator handles that)
+                if (message.content.isEmpty()) {
+                    return@Row
+                }
+                
                 Column(
                     modifier = Modifier
                         .fillMaxWidth(0.98f)
@@ -631,8 +636,8 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     
-                    // Citations section
-                    if (message.citations.isNotEmpty()) {
+                    // Citations section - only show after content has started streaming
+                    if (message.citations.isNotEmpty() && message.content.isNotBlank()) {
                         Spacer(modifier = Modifier.height(4.dp))
                         CitationsSection(citations = message.citations)
                     }
@@ -704,13 +709,21 @@ class MainActivity : ComponentActivity() {
     
     @Composable
     private fun CitationItem(citation: io.shubham0204.startwithsmollm.rag.Citation) {
+        // Clean up the chunk text - normalize whitespace and remove weird formatting
+        val cleanedText = remember(citation.chunkText) {
+            citation.chunkText
+                .replace(Regex("\\s+"), " ")  // Collapse multiple whitespace to single space
+                .replace(Regex("[\\t\\r]"), " ")  // Replace tabs and carriage returns
+                .trim()
+        }
+        
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.surface
             )
         ) {
-            Column(modifier = Modifier.padding(8.dp)) {
+            Column(modifier = Modifier.padding(10.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -720,21 +733,26 @@ class MainActivity : ComponentActivity() {
                         text = "[${citation.index}] ${citation.documentName}",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "${"%.1f".format(citation.score * 100)}% match",
+                        text = "${(citation.score * 100).toInt()}%",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
                     )
                 }
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = citation.chunkText,
+                    text = "\"$cleanedText\"",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 3,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    lineHeight = 16.sp
                 )
             }
         }

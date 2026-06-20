@@ -2,24 +2,25 @@ package io.shubham0204.startwithsmollm.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// ===== Premium neutral palette inspired by Google Edge Gallery / Apple apps =====
-// Warm off-white backgrounds, soft stone neutrals, refined blue accent. No purple.
+// ===== Brand palette derived from the app icon gradient =====
+// Icon gradient: Indigo #6366F1 → Violet #8B5CF6 → Purple #A855F7
+// Warm-neutral surfaces preserved for readability; brand accents drive primary/secondary/tertiary.
 
 // --- Light scheme ---
-val LightPrimary = Color(0xFF1F6FEB)          // refined Google-style blue
+val LightPrimary = Color(0xFF6366F1)          // indigo-500 (icon start)
 val LightOnPrimary = Color(0xFFFFFFFF)
-val LightPrimaryContainer = Color(0xFFDDEAFB) // soft blue tint
-val LightOnPrimaryContainer = Color(0xFF0B2A57)
+val LightPrimaryContainer = Color(0xFFE0E1FD) // soft indigo tint
+val LightOnPrimaryContainer = Color(0xFF1E1B5C)
 
-val LightSecondary = Color(0xFF475569)        // slate-600 — neutral accent
+val LightSecondary = Color(0xFF8B5CF6)        // violet-500 (icon mid)
 val LightOnSecondary = Color(0xFFFFFFFF)
-val LightSecondaryContainer = Color(0xFFE9EDF1)
-val LightOnSecondaryContainer = Color(0xFF1E293B)
+val LightSecondaryContainer = Color(0xFFEDE4FE)
+val LightOnSecondaryContainer = Color(0xFF2E1065)
 
-val LightTertiary = Color(0xFF0F766E)         // teal-700 (subtle, used rarely)
+val LightTertiary = Color(0xFFA855F7)         // purple-500 (icon end)
 val LightOnTertiary = Color(0xFFFFFFFF)
-val LightTertiaryContainer = Color(0xFFCFF3EE)
-val LightOnTertiaryContainer = Color(0xFF003F38)
+val LightTertiaryContainer = Color(0xFFF3E4FE)
+val LightOnTertiaryContainer = Color(0xFF3B0764)
 
 val LightError = Color(0xFFB42318)
 val LightOnError = Color(0xFFFFFFFF)
@@ -39,20 +40,20 @@ val LightSurfaceContainer = Color(0xFFF1EFEB) // bubble background
 val LightSurfaceContainerHigh = Color(0xFFE9E7E2) // input pill
 
 // --- Dark scheme ---
-val DarkPrimary = Color(0xFF8AB4F8)            // soft Google blue (dark)
-val DarkOnPrimary = Color(0xFF06214D)
-val DarkPrimaryContainer = Color(0xFF12386E)
-val DarkOnPrimaryContainer = Color(0xFFD7E4FB)
+val DarkPrimary = Color(0xFFA5A6F6)            // lifted indigo for dark surfaces
+val DarkOnPrimary = Color(0xFF1E1B5C)
+val DarkPrimaryContainer = Color(0xFF3730A3)
+val DarkOnPrimaryContainer = Color(0xFFE0E1FD)
 
-val DarkSecondary = Color(0xFF94A3B8)          // slate-400
-val DarkOnSecondary = Color(0xFF0F172A)
-val DarkSecondaryContainer = Color(0xFF1F2937)
-val DarkOnSecondaryContainer = Color(0xFFE2E8F0)
+val DarkSecondary = Color(0xFFC4B5FD)          // lifted violet
+val DarkOnSecondary = Color(0xFF2E1065)
+val DarkSecondaryContainer = Color(0xFF5B21B6)
+val DarkOnSecondaryContainer = Color(0xFFEDE4FE)
 
-val DarkTertiary = Color(0xFF5EEAD4)
-val DarkOnTertiary = Color(0xFF003F38)
-val DarkTertiaryContainer = Color(0xFF134E48)
-val DarkOnTertiaryContainer = Color(0xFFCFF3EE)
+val DarkTertiary = Color(0xFFD8B4FE)           // lifted purple
+val DarkOnTertiary = Color(0xFF3B0764)
+val DarkTertiaryContainer = Color(0xFF7E22CE)
+val DarkOnTertiaryContainer = Color(0xFFF3E4FE)
 
 val DarkError = Color(0xFFFCA5A5)
 val DarkOnError = Color(0xFF5A0F0A)

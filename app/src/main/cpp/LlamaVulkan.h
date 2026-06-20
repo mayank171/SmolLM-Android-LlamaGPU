@@ -27,6 +27,11 @@ class LlamaVulkan {
     std::vector<llama_token> _promptTokens;
     std::vector<llama_token> _cachedTokens;  // Tokens already in KV cache
     const char* _chatTemplate = nullptr;
+    
+    // System prompt caching for TTFT optimization
+    std::vector<llama_token> _systemPromptTokens;  // Cached system prompt tokens
+    std::vector<uint8_t> _systemPromptKVState;     // Cached KV state for system prompt
+    int _systemPromptKVSize = 0;                   // Number of KV entries for system prompt
 
     std::string _response;
     std::string _cacheResponseTokens;
@@ -84,6 +89,14 @@ public:
     
     // Remove oldest N message pairs from internal message list
     void removeOldestMessages(int count);
+    
+    // System prompt caching for TTFT optimization
+    // Caches the KV state after processing system prompt, allowing fast restore
+    bool cacheSystemPrompt();           // Save current KV state as system prompt cache
+    bool restoreSystemPromptCache();    // Restore KV state to cached system prompt
+    bool hasSystemPromptCache() const { return _systemPromptKVSize > 0; }
+    int getSystemPromptCacheSize() const { return _systemPromptKVSize; }
+    void clearSystemPromptCache();      // Clear the cached system prompt state
     
     // GPU-specific methods
     bool isUsingGPU() const { return _useGPU; }

@@ -218,3 +218,47 @@ Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_rebuildCacheWithSummary(
     llamaVulkan->rebuildCacheWithSummary(summaryStr, keepRecentN);
     env->ReleaseStringUTFChars(summary, summaryStr);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SYSTEM PROMPT CACHING JNI
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_cacheSystemPrompt(
+    JNIEnv* env, jobject thiz, jlong modelPtr) {
+    
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    return llamaVulkan->cacheSystemPrompt();
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_restoreSystemPromptCache(
+    JNIEnv* env, jobject thiz, jlong modelPtr) {
+    
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    return llamaVulkan->restoreSystemPromptCache();
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_hasSystemPromptCache(
+    JNIEnv* env, jobject thiz, jlong modelPtr) {
+    
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    return llamaVulkan->hasSystemPromptCache();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_getSystemPromptCacheSize(
+    JNIEnv* env, jobject thiz, jlong modelPtr) {
+    
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    return llamaVulkan->getSystemPromptCacheSize();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_shubham0204_startwithsmollm_gpu_LlamaGPU_clearSystemPromptCache(
+    JNIEnv* env, jobject thiz, jlong modelPtr) {
+    
+    auto* llamaVulkan = reinterpret_cast<LlamaVulkan*>(modelPtr);
+    llamaVulkan->clearSystemPromptCache();
+}

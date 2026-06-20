@@ -390,6 +390,7 @@ void LlamaVulkan::startCompletion(const char* query) {
         common_chat_templates_inputs inputs;
         inputs.use_jinja = true;
         inputs.messages = messages;
+        inputs.add_generation_prompt = true;  // CRITICAL: Add assistant turn marker
         auto templates = common_chat_templates_init(_model, _chatTemplate);
         std::string prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
         _promptTokens = common_tokenize(llama_model_get_vocab(_model), prompt, true, true);
@@ -749,6 +750,94 @@ void LlamaVulkan::removeOldestMessages(int count) {
     LOGi("Chat history now has %zu messages", _messages.size());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SYSTEM PROMPT CACHING: Cache KV state after processing system prompt
+// This allows fast restore when clearing chat for RAG queries, avoiding
+// re-encoding the system prompt every time (saves 500-2000ms TTFT)
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool LlamaVulkan::cacheSystemPrompt() {
+    if (!_ctx) {
+        LOGe("Cannot cache system prompt: context not initialized");
+        return false;
+    }
+    
+    // Get current context usage (should be just the system prompt)
+    llama_memory_t mem = llama_get_memory(_ctx);
+    if (!mem) {
+        LOGe("Cannot cache system prompt: memory not available");
+        return false;
+    }
+    
+    int currentKVSize = llama_memory_seq_pos_max(mem, 0) + 1;
+    if (currentKVSize <= 0) {
+        LOGe("Cannot cache system prompt: no tokens in KV cache");
+        return false;
+    }
+    
+    LOGi("Caching system prompt KV state: %d tokens", currentKVSize);
+    
+    // Get state size and allocate buffer
+    size_t stateSize = llama_state_get_size(_ctx);
+    _systemPromptKVState.resize(stateSize);
+    
+    // Save state to buffer
+    size_t savedSize = llama_state_get_data(_ctx, _systemPromptKVState.data(), stateSize);
+    if (savedSize == 0) {
+        LOGe("Failed to get system prompt state data");
+        _systemPromptKVState.clear();
+        return false;
+    }
+    
+    // Resize to actual saved size
+    _systemPromptKVState.resize(savedSize);
+    
+    // Save the token count and tokens
+    _systemPromptKVSize = currentKVSize;
+    _systemPromptTokens = _cachedTokens;
+    
+    LOGi("System prompt cached: %d tokens, %.2f MB state", 
+         _systemPromptKVSize, savedSize / (1024.0 * 1024.0));
+    
+    return true;
+}
+
+bool LlamaVulkan::restoreSystemPromptCache() {
+    if (!_ctx) {
+        LOGe("Cannot restore system prompt: context not initialized");
+        return false;
+    }
+    
+    if (_systemPromptKVState.empty() || _systemPromptKVSize <= 0) {
+        LOGi("No system prompt cache to restore");
+        return false;
+    }
+    
+    LOGi("Restoring system prompt cache: %d tokens, %.2f MB", 
+         _systemPromptKVSize, _systemPromptKVState.size() / (1024.0 * 1024.0));
+    
+    // Restore state from buffer
+    size_t loaded = llama_state_set_data(_ctx, _systemPromptKVState.data(), _systemPromptKVState.size());
+    if (loaded == 0) {
+        LOGe("Failed to restore system prompt state");
+        return false;
+    }
+    
+    // Restore cached tokens for incremental processing
+    _cachedTokens = _systemPromptTokens;
+    _nCtxUsed = _systemPromptKVSize;
+    
+    LOGi("System prompt cache restored: %d tokens ready", _systemPromptKVSize);
+    return true;
+}
+
+void LlamaVulkan::clearSystemPromptCache() {
+    _systemPromptKVState.clear();
+    _systemPromptTokens.clear();
+    _systemPromptKVSize = 0;
+    LOGi("System prompt cache cleared");
+}
+
 LlamaVulkan::~LlamaVulkan() {
     for (llama_chat_message& message : _messages) {
         free(const_cast<char*>(message.role));
@@ -896,6 +985,7 @@ void LlamaVulkan::rebuildCacheWithSummary(const char* summary, int keepRecentN) 
     common_chat_templates_inputs inputs;
     inputs.use_jinja = true;
     inputs.messages = messages;
+    inputs.add_generation_prompt = true;  // Ready for next generation
     auto templates = common_chat_templates_init(_model, _chatTemplate);
     std::string fullPrompt = common_chat_templates_apply(templates.get(), inputs).prompt;
     

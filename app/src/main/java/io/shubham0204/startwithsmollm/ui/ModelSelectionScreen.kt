@@ -44,6 +44,7 @@ import androidx.compose.material.icons.outlined.Summarize
 import androidx.compose.material.icons.outlined.School
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.HourglassEmpty
+import androidx.compose.material.icons.outlined.DocumentScanner
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -644,6 +645,7 @@ private fun CapabilityChip(capability: ModelCapability) {
         ModelCapability.CREATIVE -> Triple(Icons.Outlined.AutoAwesome, "Creative", Color(0xFFFFB74D))
         ModelCapability.SUMMARIZATION -> Triple(Icons.Outlined.Summarize, "Summary", Color(0xFF81C784))
         ModelCapability.KNOWLEDGE -> Triple(Icons.Outlined.School, "Knowledge", Color(0xFF9575CD))
+        ModelCapability.OCR -> Triple(Icons.Outlined.DocumentScanner, "OCR", Color(0xFF4FC3F7))
     }
     
     androidx.compose.material3.Surface(

@@ -457,4 +457,66 @@ class LlamaGPU {
     fun rebuildCacheWithSummary(summary: String, keepRecentN: Int) {
         rebuildCacheWithSummary(nativePtr, summary, keepRecentN)
     }
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // SYSTEM PROMPT CACHING
+    // Caches the KV state after processing system prompt for fast restore.
+    // This significantly reduces TTFT for RAG queries where we clear chat
+    // between queries but always use the same system prompt.
+    // ─────────────────────────────────────────────────────────────────────────
+    
+    /**
+     * Cache the current KV state as the system prompt cache.
+     * Call this AFTER adding the system prompt and running one inference
+     * (or after addSystemPrompt + a dummy completion to populate KV cache).
+     * 
+     * @return true if caching succeeded
+     */
+    fun cacheSystemPrompt(): Boolean {
+        verifyHandle()
+        return cacheSystemPrompt(nativePtr)
+    }
+    
+    /**
+     * Restore the KV cache to the cached system prompt state.
+     * Use this instead of clearChat() when you want to start fresh
+     * but keep the system prompt already encoded.
+     * 
+     * @return true if restore succeeded, false if no cache exists
+     */
+    fun restoreSystemPromptCache(): Boolean {
+        verifyHandle()
+        return restoreSystemPromptCache(nativePtr)
+    }
+    
+    /**
+     * Check if a system prompt cache exists
+     */
+    fun hasSystemPromptCache(): Boolean {
+        verifyHandle()
+        return hasSystemPromptCache(nativePtr)
+    }
+    
+    /**
+     * Get the number of tokens in the cached system prompt
+     */
+    fun getSystemPromptCacheSize(): Int {
+        verifyHandle()
+        return getSystemPromptCacheSize(nativePtr)
+    }
+    
+    /**
+     * Clear the system prompt cache (e.g., when changing models or system prompts)
+     */
+    fun clearSystemPromptCache() {
+        verifyHandle()
+        clearSystemPromptCache(nativePtr)
+    }
+    
+    // Native methods for system prompt caching
+    private external fun cacheSystemPrompt(modelPtr: Long): Boolean
+    private external fun restoreSystemPromptCache(modelPtr: Long): Boolean
+    private external fun hasSystemPromptCache(modelPtr: Long): Boolean
+    private external fun getSystemPromptCacheSize(modelPtr: Long): Int
+    private external fun clearSystemPromptCache(modelPtr: Long)
 }
