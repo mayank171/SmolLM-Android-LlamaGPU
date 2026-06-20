@@ -23,6 +23,7 @@ import io.shubham0204.startwithsmollm.rag.RagConfig
 import io.shubham0204.startwithsmollm.rag.RagEngine
 import io.shubham0204.startwithsmollm.rag.profiling.Profiler
 import io.shubham0204.startwithsmollm.voice.VoiceManager
+import io.shubham0204.startwithsmollm.image.ImageQueryProcessor
 import android.net.Uri
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
@@ -48,7 +49,9 @@ enum class UserRole {
 data class ChatMessage(
     val content: String,
     val userRole: UserRole,
-    val citations: List<io.shubham0204.startwithsmollm.rag.Citation> = emptyList()
+    val citations: List<io.shubham0204.startwithsmollm.rag.Citation> = emptyList(),
+    val imageUri: Uri? = null,
+    val extractedImageText: String? = null
 )
 
 enum class ModelLoadingState {
@@ -125,6 +128,8 @@ sealed interface AppEvent {
     data object StartRagBenchmark : AppEvent
     // Bluetooth events
     data class ReceiveBluetoothResponse(val response: String) : AppEvent
+    // Image input events
+    data class ProcessImageQuery(val imageUri: Uri, val question: String, val preExtractedText: String? = null) : AppEvent
 }
 
 class MainActivityViewModel(application: Application) : AndroidViewModel(application) {
@@ -150,6 +155,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private var summarizerGPU: LlamaGPU? = null  // Secondary tiny model for summarization
     private val ragEngine = RagEngine(application)
     private val voiceManager = VoiceManager(application)
+    private val imageQueryProcessor = ImageQueryProcessor(application)
     private val profiler = if (Profiler.isInitialized()) Profiler.getInstance(application) else null
     private var currentModelPath: String = ""
     private var currentModel: ModelInfo? = null
@@ -302,6 +308,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             is AppEvent.StartRagBenchmark -> startRagBenchmark()
             // Bluetooth events
             is AppEvent.ReceiveBluetoothResponse -> receiveBluetoothResponse(event.response)
+            // Image input events
+            is AppEvent.ProcessImageQuery -> processImageQuery(event.imageUri, event.question, event.preExtractedText)
         }
     }
     
@@ -317,6 +325,253 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
                     modelInferenceState = ModelInferenceState.IDLE
                 )
             )
+        }
+    }
+    
+    private fun processImageQuery(imageUri: Uri, question: String, preExtractedText: String? = null) {
+        // Cancel any existing inference
+        inferenceJob?.cancel()
+        
+        // Use Dispatchers.Default to match processQuery (CPU-bound for native llama.cpp calls)
+        inferenceJob = viewModelScope.launch(Dispatchers.Default) {
+            android.util.Log.d("SmolLM", "")
+            android.util.Log.d("SmolLM", "╔═══════════════════════════════════════════════════════════════╗")
+            android.util.Log.d("SmolLM", "║           📸 IMAGE QUERY STARTED                              ║")
+            android.util.Log.d("SmolLM", "╚═══════════════════════════════════════════════════════════════╝")
+            android.util.Log.d("SmolLM", "Image URI: $imageUri")
+            android.util.Log.d("SmolLM", "Question: $question")
+            android.util.Log.d("SmolLM", "Pre-extracted text: ${if (preExtractedText != null) "YES (${preExtractedText.length} chars) - SKIPPING OCR" else "NO"}")
+            
+            // Show loading state with user's image message
+            withContext(Dispatchers.Main) {
+                _appStateFlow.update { state ->
+                    state.copy(
+                        chatState = state.chatState.copy(
+                            messages = state.chatState.messages.addChatMessage(
+                                ChatMessage(
+                                    content = question.ifBlank { "What's in this image?" },
+                                    userRole = UserRole.HUMAN,
+                                    imageUri = imageUri,
+                                    extractedImageText = preExtractedText
+                                )
+                            ),
+                            modelInferenceState = ModelInferenceState.LOADING
+                        )
+                    )
+                }
+            }
+            
+            // Fast path: if OCR was already run in preview dialog, skip it entirely
+            if (!preExtractedText.isNullOrBlank()) {
+                val prompt = imageQueryProcessor.buildPromptFromText(preExtractedText, question)
+                android.util.Log.d("SmolLM", "⚡ Fast path: prompt built directly from pre-extracted text (${prompt.length} chars)")
+                runImageInference(prompt, imageUri)
+                return@launch
+            }
+            
+            // Slow path: run OCR now (fallback if pre-extraction wasn't done)
+            when (val result = imageQueryProcessor.processImageQuery(imageUri, question)) {
+                is ImageQueryProcessor.ProcessResult.Success -> {
+                    android.util.Log.d("SmolLM", "✅ OCR Success: ${result.extractedText.length} chars")
+                    android.util.Log.d("SmolLM", "📝 Sending augmented prompt to LLM...")
+                    
+                    // Update the user message with extracted text
+                    withContext(Dispatchers.Main) {
+                        _appStateFlow.update { state ->
+                            val messages = state.chatState.messages.toMutableList()
+                            if (messages.isNotEmpty()) {
+                                val lastMsg = messages.last()
+                                if (lastMsg.userRole == UserRole.HUMAN && lastMsg.imageUri == imageUri) {
+                                    messages[messages.lastIndex] = lastMsg.copy(
+                                        extractedImageText = result.extractedText
+                                    )
+                                }
+                            }
+                            state.copy(
+                                chatState = state.chatState.copy(
+                                    messages = messages.toImmutableList()
+                                )
+                            )
+                        }
+                    }
+                    
+                    // Now run inference with the augmented prompt
+                    runImageInference(result.augmentedPrompt, imageUri)
+                }
+                
+                is ImageQueryProcessor.ProcessResult.NoTextFound -> {
+                    android.util.Log.d("SmolLM", "⚠️ No text found in image")
+                    withContext(Dispatchers.Main) {
+                        _appStateFlow.update { state ->
+                            state.copy(
+                                chatState = state.chatState.copy(
+                                    messages = state.chatState.messages.addChatMessage(
+                                        ChatMessage(
+                                            content = "I couldn't find any text in this image. The image might not contain readable text, or it may be too blurry.",
+                                            userRole = UserRole.LLM
+                                        )
+                                    ),
+                                    modelInferenceState = ModelInferenceState.IDLE,
+                                    toastMessage = "No text found in image"
+                                )
+                            )
+                        }
+                    }
+                }
+                
+                is ImageQueryProcessor.ProcessResult.Error -> {
+                    android.util.Log.e("SmolLM", "❌ Image processing error: ${result.message}")
+                    withContext(Dispatchers.Main) {
+                        _appStateFlow.update { state ->
+                            state.copy(
+                                chatState = state.chatState.copy(
+                                    messages = state.chatState.messages.addChatMessage(
+                                        ChatMessage(
+                                            content = "Sorry, I couldn't process this image: ${result.message}",
+                                            userRole = UserRole.LLM
+                                        )
+                                    ),
+                                    modelInferenceState = ModelInferenceState.IDLE,
+                                    toastMessage = "Image processing failed"
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private suspend fun runImageInference(augmentedPrompt: String, imageUri: Uri) {
+        val queryStartTime = System.currentTimeMillis()
+        var ttft: Long? = null
+        var lastTokenTime: Long = queryStartTime
+        val itlTimes = mutableListOf<Long>()
+        var tokenCount = 0
+        val responseBuilder = StringBuilder()
+        
+        // 🔍 DIAGNOSTICS: Log prompt size — critical for understanding slow prefill
+        val promptChars = augmentedPrompt.length
+        val estimatedPromptTokens = promptChars / 4
+        android.util.Log.d("SmolLM", "📏 IMAGE PROMPT SIZE: $promptChars chars (~$estimatedPromptTokens tokens)")
+        if (estimatedPromptTokens > 500) {
+            android.util.Log.w("SmolLM", "⚠️ LARGE PROMPT WARNING: ~$estimatedPromptTokens tokens may cause slow prefill!")
+        }
+        
+        // Create placeholder message for streaming
+        withContext(Dispatchers.Main) {
+            _appStateFlow.update { state ->
+                state.copy(
+                    chatState = state.chatState.copy(
+                        messages = state.chatState.messages.addChatMessage(
+                            ChatMessage(content = "", userRole = UserRole.LLM)
+                        )
+                    )
+                )
+            }
+        }
+        
+        try {
+            // 🔍 DIAGNOSTICS: Check mutex state before locking
+            val mutexWaitStart = System.currentTimeMillis()
+            android.util.Log.d("SmolLM", "🔒 Mutex status: ${if (llamaMutex.isLocked) "LOCKED (will wait)" else "UNLOCKED"}")
+            
+            llamaMutex.withLock {
+                val mutexWaitTime = System.currentTimeMillis() - mutexWaitStart
+                if (mutexWaitTime > 100) {
+                    android.util.Log.w("SmolLM", "⚠️ Mutex wait time: ${mutexWaitTime}ms (background work was running!)")
+                } else {
+                    android.util.Log.d("SmolLM", "✅ Mutex acquired in ${mutexWaitTime}ms")
+                }
+                
+                // 🔍 DIAGNOSTICS + SAFETY: Check context length before inference
+                val currentContextUsed = try { llamaGPU.getContextLengthUsed() } catch (e: Exception) { 0 }
+                val projectedUsage = currentContextUsed + estimatedPromptTokens + 500
+                android.util.Log.d("SmolLM", "📊 Context: $currentContextUsed used + ~$estimatedPromptTokens new = ~$projectedUsage / $maxContextSize")
+                
+                if (projectedUsage > maxContextSize * 0.95) {
+                    android.util.Log.w("SmolLM", "⚠️ Context near limit, clearing KV cache to prevent slow prefill / crash")
+                    llamaGPU.clearChat()
+                    if (currentModel?.id?.contains("gemma") == false) {
+                        llamaGPU.addSystemPrompt("You are a helpful and intelligent AI assistant. Answer questions clearly and concisely.")
+                    }
+                    estimatedTokenCount = 50
+                }
+                
+                val llmStartTime = System.currentTimeMillis()
+                android.util.Log.d("SmolLM", "🤖 Starting LLM inference for image query...")
+                
+                llamaGPU.getResponseAsFlow(augmentedPrompt).collect { piece ->
+                    val now = System.currentTimeMillis()
+                    if (ttft == null) {
+                        ttft = now - llmStartTime
+                        val totalTTFT = now - queryStartTime
+                        android.util.Log.d("SmolLM", "⚡ First token received!")
+                        android.util.Log.d("SmolLM", "   - Pure LLM TTFT: ${ttft}ms")
+                        android.util.Log.d("SmolLM", "   - Total TTFT (with overhead): ${totalTTFT}ms")
+                        android.util.Log.d("SmolLM", "   - Breakdown: Mutex=${mutexWaitTime}ms, LLM=${ttft}ms")
+                    } else {
+                        itlTimes.add(now - lastTokenTime)
+                    }
+                    lastTokenTime = now
+                    tokenCount++
+                    responseBuilder.append(piece)
+                    
+                    // Update UI with streaming response
+                    withContext(Dispatchers.Main) {
+                        _appStateFlow.update { state ->
+                            val messages = state.chatState.messages.toMutableList()
+                            if (messages.isNotEmpty() && messages.last().userRole == UserRole.LLM) {
+                                messages[messages.lastIndex] = messages.last().copy(
+                                    content = responseBuilder.toString()
+                                )
+                            }
+                            state.copy(
+                                chatState = state.chatState.copy(
+                                    messages = messages.toImmutableList()
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            
+            val totalTime = System.currentTimeMillis() - queryStartTime
+            val avgItl = if (itlTimes.isNotEmpty()) itlTimes.average() else 0.0
+            val tokensPerSec = if (totalTime > 0) tokenCount / (totalTime / 1000.0) else 0.0
+            
+            android.util.Log.d("SmolLM", "✅ Image query complete: $tokenCount tokens in ${totalTime}ms")
+            android.util.Log.d("SmolLM", "   TTFT: ${ttft}ms, Avg ITL: ${"%.1f".format(avgItl)}ms, Speed: ${"%.1f".format(tokensPerSec)} tok/s")
+            
+            withContext(Dispatchers.Main) {
+                _appStateFlow.update { state ->
+                    state.copy(
+                        chatState = state.chatState.copy(
+                            modelInferenceState = ModelInferenceState.IDLE,
+                            contextUsagePercent = calculateContextUsage()
+                        )
+                    )
+                }
+            }
+            
+        } catch (e: Exception) {
+            android.util.Log.e("SmolLM", "❌ Image inference failed: ${e.message}", e)
+            withContext(Dispatchers.Main) {
+                _appStateFlow.update { state ->
+                    val messages = state.chatState.messages.toMutableList()
+                    if (messages.isNotEmpty() && messages.last().userRole == UserRole.LLM && messages.last().content.isBlank()) {
+                        messages[messages.lastIndex] = messages.last().copy(
+                            content = "Sorry, I encountered an error processing your image query."
+                        )
+                    }
+                    state.copy(
+                        chatState = state.chatState.copy(
+                            messages = messages.toImmutableList(),
+                            modelInferenceState = ModelInferenceState.IDLE
+                        )
+                    )
+                }
+            }
         }
     }
     
@@ -1701,7 +1956,8 @@ One sentence summary:"""
                 val runtime = Runtime.getRuntime()
                 val ramBeforeLoadMB = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
                 
-                android.util.Log.d("SmolLM", "Loading ${model.name}: threads=$optimalThreads, context=$safeContextSize, kvCache=Q8_0, flashAttn=true")
+                android.util.Log.d("SmolLM", "▶▶▶ [MAIN MODEL] Loading ${model.name}: threads=$optimalThreads, context=$safeContextSize, kvCache=Q8_0, flashAttn=true")
+                android.util.Log.d("SmolLM", "▶▶▶ Device tier: ${deviceProfile.deviceTier}, CPU cores: ${Runtime.getRuntime().availableProcessors()}")
                 android.util.Log.d("SmolLM-8K-TEST", "RAM before load: ${ramBeforeLoadMB}MB")
                 
                 llamaGPU.load(

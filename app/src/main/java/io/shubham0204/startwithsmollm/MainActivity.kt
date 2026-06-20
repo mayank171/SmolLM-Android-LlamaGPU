@@ -1,5 +1,6 @@
 package io.shubham0204.startwithsmollm
 
+import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Card
@@ -241,6 +243,9 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onModelNameTap = {
                                     viewModel.onModelNameTap()
+                                },
+                                onImageQuery = { uri, question, preExtracted ->
+                                    viewModel.onEvent(AppEvent.ProcessImageQuery(uri, question, preExtracted))
                                 }
                             )
                         }
@@ -349,7 +354,8 @@ class MainActivity : ComponentActivity() {
         onCancelVoiceInput: () -> Unit = {},
         onToggleAutoSpeak: () -> Unit = {},
         onStopSpeaking: () -> Unit = {},
-        onModelNameTap: () -> Unit = {}
+        onModelNameTap: () -> Unit = {},
+        onImageQuery: (Uri, String, String?) -> Unit = { _, _, _ -> }
     ) {
         // State for showing inference insights dialog
         var showInferenceInsights by remember { mutableStateOf(false) }
@@ -532,7 +538,8 @@ class MainActivity : ComponentActivity() {
                     onCancelVoiceInput = onCancelVoiceInput,
                     onToggleAutoSpeak = onToggleAutoSpeak,
                     onStopSpeaking = onStopSpeaking,
-                    onStopGeneration = { viewModel.stopGeneration() }
+                    onStopGeneration = { viewModel.stopGeneration() },
+                    onImageQuery = onImageQuery
                 )
             }
         }
@@ -610,16 +617,39 @@ class MainActivity : ComponentActivity() {
                         ),
                         color = MaterialTheme.colorScheme.primary
                     ) {
-                        Text(
-                            text = message.content,
+                        Column(
                             modifier = Modifier.padding(
                                 horizontal = 18.dp,
                                 vertical = 12.dp
-                            ),
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            lineHeight = 22.sp
-                        )
+                            )
+                        ) {
+                            // Show image indicator if this is an image query
+                            if (message.imageUri != null) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.padding(bottom = 8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CameraAlt,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f)
+                                    )
+                                    Text(
+                                        text = "Image attached",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f)
+                                    )
+                                }
+                            }
+                            Text(
+                                text = message.content,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                lineHeight = 22.sp
+                            )
+                        }
                     }
                 }
             } else {
@@ -824,6 +854,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun MessageInput(
         modelLoadingState: ModelLoadingState,
@@ -835,10 +866,72 @@ class MainActivity : ComponentActivity() {
         onCancelVoiceInput: () -> Unit = {},
         onToggleAutoSpeak: () -> Unit = {},
         onStopSpeaking: () -> Unit = {},
-        onStopGeneration: () -> Unit = {}
+        onStopGeneration: () -> Unit = {},
+        onImageQuery: (Uri, String, String?) -> Unit = { _, _, _ -> }
     ) {
         var queryText by remember { mutableStateOf("") }
         val context = LocalContext.current
+        
+        // Image input state
+        var showImageSourceSheet by remember { mutableStateOf(false) }
+        var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+        var showImagePreview by remember { mutableStateOf(false) }
+        var isProcessingImage by remember { mutableStateOf(false) }
+        var extractedImageText by remember { mutableStateOf<String?>(null) }
+        
+        // Image input + query processor (processor lives here so we can pre-extract OCR in preview)
+        val imageInputManager = remember { io.shubham0204.startwithsmollm.image.ImageInputManager(context) }
+        val imageQueryProcessor = remember { io.shubham0204.startwithsmollm.image.ImageQueryProcessor(context) }
+        
+        // Pre-extract OCR as soon as the preview dialog opens (parallel with user typing question).
+        // This is the P0 TTFT win: by the time user hits Send, OCR is already done.
+        LaunchedEffect(showImagePreview, selectedImageUri) {
+            if (showImagePreview && selectedImageUri != null && extractedImageText == null) {
+                isProcessingImage = true
+                val uri = selectedImageUri!!
+                val text = imageQueryProcessor.extractTextOnly(uri)
+                // Guard against stale results if user dismissed/changed image
+                if (selectedImageUri == uri && showImagePreview) {
+                    extractedImageText = text ?: ""  // empty string = OCR done, no text found
+                    isProcessingImage = false
+                }
+            }
+        }
+        
+        // Camera launcher
+        val cameraLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.TakePicture()
+        ) { success ->
+            if (success) {
+                imageInputManager.getCurrentPhotoUri()?.let { uri ->
+                    selectedImageUri = uri
+                    showImagePreview = true
+                }
+            }
+        }
+        
+        // Gallery launcher
+        val galleryLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.PickVisualMedia()
+        ) { uri ->
+            uri?.let {
+                selectedImageUri = it
+                showImagePreview = true
+            }
+        }
+        
+        // Camera permission launcher
+        val cameraPermissionLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { isGranted ->
+            if (isGranted) {
+                imageInputManager.createCameraImageUri()?.let { uri ->
+                    cameraLauncher.launch(uri)
+                }
+            } else {
+                Toast.makeText(context, "Camera permission required", Toast.LENGTH_SHORT).show()
+            }
+        }
         
         // Permission launcher for microphone
         val permissionLauncher = rememberLauncherForActivityResult(
@@ -849,6 +942,55 @@ class MainActivity : ComponentActivity() {
             } else {
                 Toast.makeText(context, "Microphone permission required for voice input", Toast.LENGTH_SHORT).show()
             }
+        }
+        
+        // Image source bottom sheet
+        if (showImageSourceSheet) {
+            androidx.compose.material3.ModalBottomSheet(
+                onDismissRequest = { showImageSourceSheet = false }
+            ) {
+                io.shubham0204.startwithsmollm.ui.ImageSourceBottomSheet(
+                    onCameraClick = {
+                        showImageSourceSheet = false
+                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                            imageInputManager.createCameraImageUri()?.let { uri ->
+                                cameraLauncher.launch(uri)
+                            }
+                        } else {
+                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                        }
+                    },
+                    onGalleryClick = {
+                        showImageSourceSheet = false
+                        galleryLauncher.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    },
+                    onDismiss = { showImageSourceSheet = false }
+                )
+            }
+        }
+        
+        // Image preview dialog
+        val currentImageUri = selectedImageUri
+        if (showImagePreview && currentImageUri != null) {
+            io.shubham0204.startwithsmollm.ui.ImagePreviewDialog(
+                imageUri = currentImageUri,
+                extractedText = extractedImageText,
+                isProcessing = isProcessingImage,
+                onDismiss = {
+                    showImagePreview = false
+                    selectedImageUri = null
+                    extractedImageText = null
+                    isProcessingImage = false
+                },
+                onSend = { question ->
+                    // Pass pre-extracted text to skip redundant OCR in ViewModel
+                    val preExtracted = extractedImageText?.takeIf { it.isNotBlank() }
+                    onImageQuery(currentImageUri, question, preExtracted)
+                    showImagePreview = false
+                    selectedImageUri = null
+                    extractedImageText = null
+                }
+            )
         }
         
         Surface(
@@ -961,6 +1103,19 @@ class MainActivity : ComponentActivity() {
                                     },
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                            },
+                            leadingIcon = {
+                                IconButton(
+                                    onClick = { showImageSourceSheet = true },
+                                    enabled = modelLoadingState == ModelLoadingState.SUCCESS &&
+                                              modelInferenceState != ModelInferenceState.LOADING
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CameraAlt,
+                                        contentDescription = "Add image",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             },
                             colors = androidx.compose.material3.TextFieldDefaults.colors(
                                 focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,

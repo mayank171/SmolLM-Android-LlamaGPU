@@ -1,14 +1,100 @@
 #include "LlamaVulkan.h"
 #include <android/log.h>
+#include <algorithm>
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <pthread.h>
+#include <sched.h>
 #include <sstream>
+#include <thread>
+#include <unistd.h>
+#include <vector>
 
 #define TAG "[LlamaVulkan]"
 #define LOGi(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGe(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOGw(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CPU AFFINITY: Pin threads to performance cores
+// ─────────────────────────────────────────────────────────────────────────────
+// Most Android phones use big.LITTLE: a mix of perf cores (high freq) and
+// efficiency cores (low freq). By default the kernel schedules llama.cpp's
+// worker threads across ALL cores — any thread that lands on an efficiency
+// core drags down the entire prefill/decode batch (synchronization at every
+// matmul). Pinning to only the perf cores typically yields 1.5-2x speedup on
+// big.LITTLE devices with zero quality cost.
+//
+// Detection strategy: read cpuinfo_max_freq for each core, pick those at or
+// above 90% of the max frequency. This automatically picks the "prime + perf"
+// cluster on phones like Snapdragon 8/7-series and Dimensity 9000-series.
+//
+// Must be called from the THREAD that will later spawn llama.cpp workers —
+// they inherit the cpuset on creation (Linux default behavior).
+//
+// Returns the number of cores pinned, so caller can size its threadpool to
+// match (avoiding catastrophic over-subscription where N threads thrash on
+// M<N cores — e.g. 6 threads on 2 perf cores is *worse* than no pinning).
+static int pinToPerformanceCores() {
+    int numCores = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
+    if (numCores <= 0) return 0;
+
+    std::vector<long> coreFreqs(numCores, 0);
+    long maxFreq = 0;
+    for (int i = 0; i < numCores; i++) {
+        char path[128];
+        std::snprintf(path, sizeof(path),
+                      "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+        FILE* f = std::fopen(path, "r");
+        if (f) {
+            long freq = 0;
+            if (std::fscanf(f, "%ld", &freq) == 1) {
+                coreFreqs[i] = freq;
+                if (freq > maxFreq) maxFreq = freq;
+            }
+            std::fclose(f);
+        }
+    }
+
+    if (maxFreq <= 0) {
+        LOGw("CPU affinity: could not read cpufreq, leaving default scheduling");
+        return 0;
+    }
+
+    // Pin to cores at >= 90% of max frequency (catches prime + perf cluster).
+    long threshold = maxFreq * 9 / 10;
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    int pinned = 0;
+    std::string pinnedList;
+    for (int i = 0; i < numCores; i++) {
+        if (coreFreqs[i] >= threshold) {
+            CPU_SET(i, &mask);
+            pinned++;
+            if (!pinnedList.empty()) pinnedList += ",";
+            pinnedList += std::to_string(i);
+        }
+    }
+
+    if (pinned == 0) {
+        LOGw("CPU affinity: no cores above threshold, skipping pin");
+        return 0;
+    }
+
+    // Apply affinity to the CURRENT thread. Child worker threads created by
+    // llama.cpp/ggml after this call will inherit the same cpuset on Linux.
+    if (sched_setaffinity(0, sizeof(mask), &mask) == 0) {
+        LOGi("CPU affinity: pinned to %d perf cores [%s] (max=%ldHz, threshold=%ldHz)",
+             pinned, pinnedList.c_str(), maxFreq, threshold);
+        return pinned;
+    } else {
+        LOGw("CPU affinity: sched_setaffinity failed (errno=%d)", errno);
+        return 0;
+    }
+}
 
 bool LlamaVulkan::isVulkanAvailable() {
     // Load all backends first
@@ -46,6 +132,19 @@ void LlamaVulkan::loadModel(const char* model_path,
                             int nThreads, bool useMmap, bool useMlock, 
                             bool useGPU, int gpuLayers,
                             bool flashAttention, int kvCacheType) {
+    // Pin this thread (and any worker threads spawned during model load) to perf cores.
+    // Llama.cpp's ggml threadpool inherits affinity from its creator on Linux/Android.
+    int pinnedCores = pinToPerformanceCores();
+
+    // CRITICAL: cap nThreads to the perf-core count to avoid over-subscription.
+    // Spawning more threads than available cores causes constant preemption and
+    // is significantly *worse* than running fewer threads. On a 2-perf-core device
+    // calling with nThreads=6 made TTFT worse than no affinity at all.
+    if (pinnedCores > 0 && nThreads > pinnedCores) {
+        LOGi("Capping nThreads %d -> %d (perf core count) to avoid oversubscription",
+             nThreads, pinnedCores);
+        nThreads = pinnedCores;
+    }
     LOGi("Loading model:"
          "\n\tmodel_path = %s"
          "\n\ttemperature = %.2f"
@@ -105,6 +204,26 @@ void LlamaVulkan::loadModel(const char* model_path,
     ctx_params.n_ctx = contextSize;
     ctx_params.n_batch = contextSize;
     ctx_params.n_threads = nThreads;
+    // ⚡ Prefill thread count. Normally prefill is compute-bound and benefits from
+    // more threads. BUT if we've pinned to a restricted cpuset (perf cores only),
+    // spawning more threads than available cores causes oversubscription — those
+    // threads time-slice on the same cores and *slow down* prefill.
+    //
+    // Rule:
+    //   - If affinity is set (pinnedCores > 0): n_threads_batch == nThreads (== pinnedCores)
+    //   - If affinity is NOT set: n_threads_batch can be 2x nThreads up to hwCores
+    int hwCores = static_cast<int>(std::thread::hardware_concurrency());
+    if (hwCores <= 0) hwCores = nThreads;
+    int batchThreads;
+    if (pinnedCores > 0) {
+        // Affinity restricts us to pinnedCores. Going above this just causes contention.
+        batchThreads = nThreads;
+    } else {
+        batchThreads = std::max(nThreads, std::min(hwCores, nThreads * 2));
+    }
+    ctx_params.n_threads_batch = batchThreads;
+    LOGi("Threading: n_threads=%d (generation), n_threads_batch=%d (prefill, hwCores=%d, pinned=%d)",
+         nThreads, batchThreads, hwCores, pinnedCores);
     ctx_params.no_perf = true;
     
     // Flash Attention - reduces memory usage, recommended for mobile
@@ -195,6 +314,12 @@ int LlamaVulkan::getContextSizeUsed() const {
 }
 
 void LlamaVulkan::startCompletion(const char* query) {
+    // Re-pin the CURRENT inference thread to perf cores. The Kotlin Flow runs on
+    // a coroutine dispatcher thread which may differ between calls, so we ensure
+    // affinity is set per-inference. The native ggml threadpool was already created
+    // during loadModel with proper affinity; this just keeps the JNI caller pinned
+    // so any synchronization the calling thread does also runs on perf cores.
+    pinToPerformanceCores();
     if (!_storeChats) {
         _formattedMessages.clear();
         _formattedMessages = std::vector<char>(llama_n_ctx(_ctx));

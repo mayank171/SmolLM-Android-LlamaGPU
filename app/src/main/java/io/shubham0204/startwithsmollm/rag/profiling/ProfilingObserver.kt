@@ -38,6 +38,9 @@ class LoggingObserver(
                 Log.d(tag, "$emoji [${event.component}] ${event.operation}: ${event.durationMs}ms")
             }
             is ProfilingEvent.MemoryMeasured -> {
+                // Skip periodic sampling events — they're for the dashboard, not logcat.
+                // Logging them every sample flooded logcat (RAGProfiler spam) and burned CPU.
+                if (event.operation == "sample") return
                 val usedMb = event.usedBytes / 1024 / 1024
                 val totalMb = event.totalBytes / 1024 / 1024
                 Log.d(tag, "💾 [${event.component}] Memory: ${usedMb}MB / ${totalMb}MB")
