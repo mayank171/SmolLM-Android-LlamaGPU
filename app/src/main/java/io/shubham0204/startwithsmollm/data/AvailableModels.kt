@@ -7,7 +7,8 @@ enum class ModelCapability {
     MATH,           // Mathematical calculations
     CREATIVE,       // Creative writing
     SUMMARIZATION,  // Text summarization
-    KNOWLEDGE       // Factual knowledge
+    KNOWLEDGE,      // Factual knowledge
+    OCR             // Image text extraction (via Whisper/ML Kit)
 }
 
 enum class ModelReliability {
@@ -80,9 +81,9 @@ object AvailableModels {
             parameters = "0.5B",
             quantization = "Q4_K_M",
             maxContextSize = 4096,
-            capabilities = setOf(ModelCapability.CHAT, ModelCapability.SUMMARIZATION, ModelCapability.KNOWLEDGE),
+            capabilities = setOf(ModelCapability.CHAT, ModelCapability.SUMMARIZATION, ModelCapability.KNOWLEDGE, ModelCapability.OCR),
             reliability = ModelReliability.MEDIUM,
-            bestFor = "Quick responses, simple coding help, general knowledge",
+            bestFor = "Quick responses, simple coding help, general knowledge, image text",
             notGoodFor = "Complex math, advanced coding, detailed reasoning"
         ),
         
@@ -114,9 +115,9 @@ object AvailableModels {
             parameters = "1.5B",
             quantization = "Q4_K_M",
             maxContextSize = 4096,
-            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CODING, ModelCapability.MATH, ModelCapability.KNOWLEDGE),
+            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CODING, ModelCapability.MATH, ModelCapability.KNOWLEDGE, ModelCapability.OCR),
             reliability = ModelReliability.MEDIUM,
-            bestFor = "General assistant, basic coding, simple math, knowledge Q&A",
+            bestFor = "General assistant, basic coding, simple math, knowledge Q&A, OCR",
             notGoodFor = "Complex multi-step reasoning, advanced algorithms"
         ),
         ModelInfo(
@@ -130,9 +131,9 @@ object AvailableModels {
             quantization = "Q4_K_M",
             maxContextSize = 4096,
             supportsMultiTurn = false,
-            capabilities = setOf(ModelCapability.CHAT, ModelCapability.KNOWLEDGE, ModelCapability.CREATIVE),
+            capabilities = setOf(ModelCapability.CHAT, ModelCapability.KNOWLEDGE, ModelCapability.CREATIVE, ModelCapability.OCR),
             reliability = ModelReliability.HIGH,
-            bestFor = "Single questions, factual answers, creative writing",
+            bestFor = "Single questions, factual answers, creative writing, image text",
             notGoodFor = "Multi-turn conversations, context-dependent tasks"
         ),
         
@@ -147,9 +148,9 @@ object AvailableModels {
             parameters = "3.8B",
             quantization = "Q4_K_M",
             maxContextSize = 4096,
-            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CODING, ModelCapability.MATH, ModelCapability.KNOWLEDGE),
+            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CODING, ModelCapability.MATH, ModelCapability.KNOWLEDGE, ModelCapability.OCR),
             reliability = ModelReliability.HIGH,
-            bestFor = "Coding assistance, math problems, logical reasoning, technical Q&A",
+            bestFor = "Coding assistance, math problems, logical reasoning, technical Q&A, OCR",
             notGoodFor = "Low-end devices (needs more RAM)"
         ),
         ModelInfo(
@@ -162,9 +163,9 @@ object AvailableModels {
             parameters = "3B",
             quantization = "Q4_K_M",
             maxContextSize = 8192,
-            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CREATIVE, ModelCapability.KNOWLEDGE, ModelCapability.SUMMARIZATION),
+            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CREATIVE, ModelCapability.KNOWLEDGE, ModelCapability.SUMMARIZATION, ModelCapability.OCR),
             reliability = ModelReliability.HIGH,
-            bestFor = "General assistant, conversations, creative writing, summaries",
+            bestFor = "General assistant, conversations, creative writing, summaries, OCR",
             notGoodFor = "Advanced math, complex coding algorithms"
         ),
         ModelInfo(
@@ -177,9 +178,9 @@ object AvailableModels {
             parameters = "3B",
             quantization = "Q4_K_M",
             maxContextSize = 4096,
-            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CODING, ModelCapability.MATH, ModelCapability.KNOWLEDGE, ModelCapability.CREATIVE),
+            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CODING, ModelCapability.MATH, ModelCapability.KNOWLEDGE, ModelCapability.CREATIVE, ModelCapability.OCR),
             reliability = ModelReliability.HIGH,
-            bestFor = "Coding, math, reasoning, long documents, technical tasks",
+            bestFor = "Coding, math, reasoning, long documents, technical tasks, OCR",
             notGoodFor = "Needs more RAM than smaller models"
         ),
         
@@ -194,9 +195,9 @@ object AvailableModels {
             parameters = "7B",
             quantization = "Q4_K_M",
             maxContextSize = 1024,
-            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CODING, ModelCapability.MATH, ModelCapability.KNOWLEDGE, ModelCapability.CREATIVE, ModelCapability.SUMMARIZATION),
+            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CODING, ModelCapability.MATH, ModelCapability.KNOWLEDGE, ModelCapability.CREATIVE, ModelCapability.SUMMARIZATION, ModelCapability.OCR),
             reliability = ModelReliability.VERY_HIGH,
-            bestFor = "Complex coding, advanced math, detailed analysis, professional tasks",
+            bestFor = "Complex coding, advanced math, detailed analysis, professional tasks, OCR",
             notGoodFor = "Devices with <8GB RAM (may crash), long conversations"
         ),
         ModelInfo(
@@ -209,9 +210,9 @@ object AvailableModels {
             parameters = "7B",
             quantization = "Q4_K_M",
             maxContextSize = 1024,
-            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CREATIVE, ModelCapability.KNOWLEDGE, ModelCapability.SUMMARIZATION),
+            capabilities = setOf(ModelCapability.CHAT, ModelCapability.REASONING, ModelCapability.CREATIVE, ModelCapability.KNOWLEDGE, ModelCapability.SUMMARIZATION, ModelCapability.OCR),
             reliability = ModelReliability.VERY_HIGH,
-            bestFor = "Natural conversations, roleplay, creative writing, detailed explanations",
+            bestFor = "Natural conversations, roleplay, creative writing, detailed explanations, OCR",
             notGoodFor = "Devices with <8GB RAM (may crash), pure coding tasks"
         )
     )

@@ -68,7 +68,11 @@ data class InferenceMetrics(
     // Computed
     val avgItlMs: Float = 0f,
     val prefillTimeMs: Long = 0,
-    val decodeTimeMs: Long = 0
+    val decodeTimeMs: Long = 0,
+    
+    // Prompt caching
+    val promptCacheUsed: Boolean = false,
+    val promptCacheRestoreMs: Long = 0
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -661,6 +665,14 @@ private fun OptimizationStatusCard(metrics: InferenceMetrics) {
                 enabled = metrics.flashAttention,
                 label = "Flash Attention",
                 detail = "Memory-efficient attention"
+            )
+            OptimizationRow(
+                enabled = metrics.promptCacheUsed,
+                label = "Prompt Caching",
+                detail = if (metrics.promptCacheUsed) 
+                    "Restored in ${metrics.promptCacheRestoreMs}ms" 
+                else 
+                    "Not active (first query or non-RAG)"
             )
             OptimizationRow(
                 enabled = true,
