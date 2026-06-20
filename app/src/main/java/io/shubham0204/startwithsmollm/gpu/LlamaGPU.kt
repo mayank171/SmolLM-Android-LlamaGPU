@@ -93,7 +93,14 @@ class LlamaGPU {
         val numThreads: Int = 4,
         val useMmap: Boolean = true,
         val useMlock: Boolean = false,
-        // GPU (disabled - Vulkan crashes on Adreno)
+        // GPU (Vulkan backend is built into the .so but disabled by default).
+        //
+        // The ggml-vulkan backend crashes (SIGSEGV in vulkan tensor alloc) on
+        // certain Adreno GPUs during ggml_backend_alloc_ctx_tensors_from_buft.
+        // This is a driver-level bug, not in our code. Until a per-device
+        // allowlist or working detection exists, ship with GPU off by default.
+        //
+        // To experiment on other devices: flip these to (true, -1).
         val useGPU: Boolean = false,
         val gpuLayers: Int = 0,
         // Performance optimizations
@@ -162,13 +169,27 @@ class LlamaGPU {
     }
     
     /**
-     * Get response as a Flow for streaming
+     * Get response as a Flow for streaming.
+     *
+     * Performance: temporarily boosts the calling thread's priority to URGENT_DISPLAY
+     * so the Android scheduler favors it (and keeps native llama.cpp worker threads,
+     * which inherit niceness, on performance cores). Original priority is restored
+     * in finally to avoid leaking the boost back to the IO thread pool.
      */
     fun getResponseAsFlow(query: String): Flow<String> = flow {
         verifyHandle()
         shouldStopInference = false
         isInferenceRunning = true
+        val originalPriority = android.os.Process.getThreadPriority(android.os.Process.myTid())
         try {
+            // Boost priority for the inference thread. URGENT_DISPLAY (-8) is the same
+            // tier used by the Android UI compositor — strong scheduler preference without
+            // requiring special permissions like URGENT_AUDIO.
+            try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
+            } catch (e: SecurityException) {
+                android.util.Log.w("LlamaGPU", "Could not boost thread priority: ${e.message}")
+            }
             startCompletion(nativePtr, query)
             var piece = completionLoop(nativePtr)
             while (piece != "[EOG]" && !shouldStopInference) {
@@ -181,6 +202,10 @@ class LlamaGPU {
             stopCompletion(nativePtr)
         } finally {
             isInferenceRunning = false
+            // Restore priority so we don't pollute the IO dispatcher thread pool
+            try {
+                android.os.Process.setThreadPriority(originalPriority)
+            } catch (_: Exception) { }
         }
     }.flowOn(Dispatchers.IO)
     

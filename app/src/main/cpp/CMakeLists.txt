@@ -96,7 +96,18 @@ target_compile_options(
     -O3
 )
 
-# Link against pre-built libraries (CPU only - Vulkan crashes on some Adreno GPUs)
+# Link against pre-built libraries.
+#
+# IMPORTANT: ggml-vulkan is deliberately NOT linked here despite being built.
+# The build script (scripts/build_llama_vulkan.sh) produces libggml-vulkan.so
+# in jniLibs/ for devices that support it, but on Adreno GPUs in our test
+# device the Vulkan backend crashes during ggml_backend_sched_reserve (SIGSEGV
+# inside libggml-vulkan.so) — even when useGPU=false at the API level. This
+# is because llama.cpp's backend scheduler auto-enumerates ALL registered
+# backends, and registration happens via static constructor on .so load.
+#
+# To enable Vulkan on devices that support it, add `ggml-vulkan` to the
+# target_link_libraries list below.
 target_link_libraries(
     llamavulkan
     android

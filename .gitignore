@@ -19,6 +19,10 @@ local.properties
 # llama.cpp - clone separately if needed for rebuilding native libs
 llama.cpp/
 
+# Vulkan rebuild artifacts (output of scripts/build_llama_vulkan.sh)
+.vulkan-build/
+.vulkan-build.log
+
 # whisper.cpp - clone separately if needed for rebuilding native libs
 whisper.cpp/
 

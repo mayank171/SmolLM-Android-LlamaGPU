@@ -60,7 +60,8 @@ class DetailedProfilingStrategy : ProfilingStrategy {
     override fun shouldProfile(operation: String, component: String) = true
     override fun shouldTrackMemory() = true
     override fun shouldTrackCpu() = false
-    override fun getSamplingIntervalMs() = 1000L
+    // Bumped 1000ms -> 5000ms: memory rarely changes within 1s; reduces CPU/log overhead during inference
+    override fun getSamplingIntervalMs() = 5000L
 }
 
 /**
@@ -70,7 +71,8 @@ class VerboseProfilingStrategy : ProfilingStrategy {
     override fun shouldProfile(operation: String, component: String) = true
     override fun shouldTrackMemory() = true
     override fun shouldTrackCpu() = true
-    override fun getSamplingIntervalMs() = 500L
+    // Bumped 500ms -> 2000ms to reduce CPU contention during inference
+    override fun getSamplingIntervalMs() = 2000L
 }
 
 /**
@@ -80,5 +82,6 @@ class BenchmarkProfilingStrategy : ProfilingStrategy {
     override fun shouldProfile(operation: String, component: String) = true
     override fun shouldTrackMemory() = true
     override fun shouldTrackCpu() = true
-    override fun getSamplingIntervalMs() = 100L
+    // Bumped 100ms -> 1000ms: 100ms was flooding logcat (10 events/sec across UI thread) and burning CPU during inference
+    override fun getSamplingIntervalMs() = 1000L
 }

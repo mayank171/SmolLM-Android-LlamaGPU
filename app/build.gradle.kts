@@ -96,6 +96,9 @@ dependencies {
     // ML Kit for OCR (text recognition from images)
     implementation("com.google.mlkit:text-recognition:16.0.0")
     
+    // Coil for image loading in Compose
+    implementation("io.coil-kt:coil-compose:2.5.0")
+    
     // Kotlinx Serialization for Bluetooth data transfer
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
 

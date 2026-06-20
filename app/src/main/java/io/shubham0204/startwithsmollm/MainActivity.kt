@@ -1,5 +1,6 @@
 package io.shubham0204.startwithsmollm
 
+import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -46,7 +47,7 @@ import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.Analytics
-import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Card
@@ -77,7 +78,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.shubham0204.startwithsmollm.ui.BenchmarkScreen
-import io.shubham0204.startwithsmollm.ui.BluetoothDeviceSelectionDialog
 import io.shubham0204.startwithsmollm.ui.InferenceInsightsScreen
 import io.shubham0204.startwithsmollm.ui.MarkdownText
 import io.shubham0204.startwithsmollm.ui.ModelSelectionScreen
@@ -86,11 +86,6 @@ import io.shubham0204.startwithsmollm.ui.RagBenchmarkScreen
 import io.shubham0204.startwithsmollm.ui.theme.SmolLMStarterTemplateTheme
 import io.shubham0204.startwithsmollm.voice.VoiceManager
 import io.shubham0204.startwithsmollm.data.ExpertMode
-import io.shubham0204.startwithsmollm.bluetooth.BluetoothInferenceClient
-import io.shubham0204.startwithsmollm.bluetooth.BluetoothInferenceServer
-import io.shubham0204.startwithsmollm.bluetooth.DeviceInfo
-import kotlinx.coroutines.launch
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.lifecycle.viewModelScope
 import kotlinx.collections.immutable.ImmutableList
 import android.Manifest
@@ -111,54 +106,7 @@ class MainActivity : ComponentActivity() {
             SmolLMStarterTemplateTheme {
                 val appState by viewModel.appStateFlow.collectAsState()
                 val context = LocalContext.current
-                
-                // Bluetooth state
-                var showBluetoothDialog by remember { mutableStateOf(false) }
-                var bluetoothDevices by remember { mutableStateOf<List<DeviceInfo>>(emptyList()) }
-                var isDiscovering by remember { mutableStateOf(false) }
-                val bluetoothClient = remember { BluetoothInferenceClient(context) }
-                val coroutineScope = rememberCoroutineScope()
-                
-                // Local toast state for ad-hoc messages (bluetooth errors, permissions)
-                var localToastMessage by remember { mutableStateOf<String?>(null) }
-                var localToastType by remember { mutableStateOf(io.shubham0204.startwithsmollm.ui.ToastType.INFO) }
-                
-                // Bluetooth device selection dialog
-                if (showBluetoothDialog) {
-                    BluetoothDeviceSelectionDialog(
-                        devices = bluetoothDevices,
-                        isLoading = isDiscovering,
-                        onDeviceSelected = { device ->
-                            showBluetoothDialog = false
-                            // Get current message to send
-                            val lastMessage = appState.chatState.messages.lastOrNull()?.content ?: ""
-                            if (lastMessage.isNotEmpty()) {
-                                coroutineScope.launch {
-                                    val response = bluetoothClient.sendInferenceRequest(
-                                        deviceAddress = device.deviceAddress,
-                                        prompt = lastMessage,
-                                        modelName = appState.chatState.currentModelName
-                                    )
-                                    if (response.success) {
-                                        viewModel.onEvent(AppEvent.ReceiveBluetoothResponse(response.text))
-                                    } else {
-                                        localToastMessage = "Bluetooth inference failed: ${response.errorMessage}"
-                                        localToastType = io.shubham0204.startwithsmollm.ui.ToastType.ERROR
-                                    }
-                                }
-                            }
-                        },
-                        onDismiss = { showBluetoothDialog = false },
-                        onRefresh = {
-                            coroutineScope.launch {
-                                isDiscovering = true
-                                bluetoothDevices = bluetoothClient.discoverDevices()
-                                isDiscovering = false
-                            }
-                        }
-                    )
-                }
-                
+
                 androidx.compose.foundation.layout.Box(modifier = androidx.compose.ui.Modifier.fillMaxSize()) {
                 AnimatedContent(
                     targetState = appState.currentScreen,
@@ -213,14 +161,6 @@ class MainActivity : ComponentActivity() {
                                 onBenchmarkClick = {
                                     viewModel.onEvent(AppEvent.OpenBenchmark)
                                 },
-                                onBluetoothClick = {
-                                    showBluetoothDialog = true
-                                    coroutineScope.launch {
-                                        isDiscovering = true
-                                        bluetoothDevices = bluetoothClient.discoverDevices()
-                                        isDiscovering = false
-                                    }
-                                },
                                 onRagClick = {
                                     viewModel.onEvent(AppEvent.OpenRag)
                                 },
@@ -241,6 +181,9 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onModelNameTap = {
                                     viewModel.onModelNameTap()
+                                },
+                                onImageQuery = { uri, question, preExtracted ->
+                                    viewModel.onEvent(AppEvent.ProcessImageQuery(uri, question, preExtracted))
                                 }
                             )
                         }
@@ -313,17 +256,9 @@ class MainActivity : ComponentActivity() {
                 
                 // Themed toast overlay (covers all screens)
                 io.shubham0204.startwithsmollm.ui.AppToastHost(
-                    message = appState.chatState.toastMessage ?: localToastMessage,
-                    type = if (appState.chatState.toastMessage != null)
-                        io.shubham0204.startwithsmollm.ui.ToastType.INFO
-                    else localToastType,
-                    onDismiss = {
-                        if (appState.chatState.toastMessage != null) {
-                            viewModel.onEvent(AppEvent.ClearToast)
-                        } else {
-                            localToastMessage = null
-                        }
-                    }
+                    message = appState.chatState.toastMessage,
+                    type = io.shubham0204.startwithsmollm.ui.ToastType.INFO,
+                    onDismiss = { viewModel.onEvent(AppEvent.ClearToast) }
                 )
                 } // end Box
             }
@@ -342,14 +277,14 @@ class MainActivity : ComponentActivity() {
         onQuerySubmit: (String) -> Unit,
         onClearChat: () -> Unit,
         onBenchmarkClick: () -> Unit,
-        onBluetoothClick: () -> Unit = {},
         onRagClick: () -> Unit = {},
         onStartVoiceInput: () -> Unit = {},
         onStopVoiceInput: () -> Unit = {},
         onCancelVoiceInput: () -> Unit = {},
         onToggleAutoSpeak: () -> Unit = {},
         onStopSpeaking: () -> Unit = {},
-        onModelNameTap: () -> Unit = {}
+        onModelNameTap: () -> Unit = {},
+        onImageQuery: (Uri, String, String?) -> Unit = { _, _, _ -> }
     ) {
         // State for showing inference insights dialog
         var showInferenceInsights by remember { mutableStateOf(false) }
@@ -459,16 +394,6 @@ class MainActivity : ComponentActivity() {
                                         onBenchmarkClick()
                                     }
                                 )
-                                androidx.compose.material3.DropdownMenuItem(
-                                    text = { Text("Bluetooth inference") },
-                                    leadingIcon = {
-                                        Icon(Icons.Default.Bluetooth, contentDescription = null)
-                                    },
-                                    onClick = {
-                                        showOverflowMenu = false
-                                        onBluetoothClick()
-                                    }
-                                )
                                 if (isExpertMode) {
                                     androidx.compose.material3.DropdownMenuItem(
                                         text = { Text("Inference insights") },
@@ -532,7 +457,8 @@ class MainActivity : ComponentActivity() {
                     onCancelVoiceInput = onCancelVoiceInput,
                     onToggleAutoSpeak = onToggleAutoSpeak,
                     onStopSpeaking = onStopSpeaking,
-                    onStopGeneration = { viewModel.stopGeneration() }
+                    onStopGeneration = { viewModel.stopGeneration() },
+                    onImageQuery = onImageQuery
                 )
             }
         }
@@ -610,16 +536,39 @@ class MainActivity : ComponentActivity() {
                         ),
                         color = MaterialTheme.colorScheme.primary
                     ) {
-                        Text(
-                            text = message.content,
+                        Column(
                             modifier = Modifier.padding(
                                 horizontal = 18.dp,
                                 vertical = 12.dp
-                            ),
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            lineHeight = 22.sp
-                        )
+                            )
+                        ) {
+                            // Show image indicator if this is an image query
+                            if (message.imageUri != null) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.padding(bottom = 8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CameraAlt,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f)
+                                    )
+                                    Text(
+                                        text = "Image attached",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f)
+                                    )
+                                }
+                            }
+                            Text(
+                                text = message.content,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                lineHeight = 22.sp
+                            )
+                        }
                     }
                 }
             } else {
@@ -824,6 +773,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun MessageInput(
         modelLoadingState: ModelLoadingState,
@@ -835,10 +785,72 @@ class MainActivity : ComponentActivity() {
         onCancelVoiceInput: () -> Unit = {},
         onToggleAutoSpeak: () -> Unit = {},
         onStopSpeaking: () -> Unit = {},
-        onStopGeneration: () -> Unit = {}
+        onStopGeneration: () -> Unit = {},
+        onImageQuery: (Uri, String, String?) -> Unit = { _, _, _ -> }
     ) {
         var queryText by remember { mutableStateOf("") }
         val context = LocalContext.current
+        
+        // Image input state
+        var showImageSourceSheet by remember { mutableStateOf(false) }
+        var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+        var showImagePreview by remember { mutableStateOf(false) }
+        var isProcessingImage by remember { mutableStateOf(false) }
+        var extractedImageText by remember { mutableStateOf<String?>(null) }
+        
+        // Image input + query processor (processor lives here so we can pre-extract OCR in preview)
+        val imageInputManager = remember { io.shubham0204.startwithsmollm.image.ImageInputManager(context) }
+        val imageQueryProcessor = remember { io.shubham0204.startwithsmollm.image.ImageQueryProcessor(context) }
+        
+        // Pre-extract OCR as soon as the preview dialog opens (parallel with user typing question).
+        // This is the P0 TTFT win: by the time user hits Send, OCR is already done.
+        LaunchedEffect(showImagePreview, selectedImageUri) {
+            if (showImagePreview && selectedImageUri != null && extractedImageText == null) {
+                isProcessingImage = true
+                val uri = selectedImageUri!!
+                val text = imageQueryProcessor.extractTextOnly(uri)
+                // Guard against stale results if user dismissed/changed image
+                if (selectedImageUri == uri && showImagePreview) {
+                    extractedImageText = text ?: ""  // empty string = OCR done, no text found
+                    isProcessingImage = false
+                }
+            }
+        }
+        
+        // Camera launcher
+        val cameraLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.TakePicture()
+        ) { success ->
+            if (success) {
+                imageInputManager.getCurrentPhotoUri()?.let { uri ->
+                    selectedImageUri = uri
+                    showImagePreview = true
+                }
+            }
+        }
+        
+        // Gallery launcher
+        val galleryLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.PickVisualMedia()
+        ) { uri ->
+            uri?.let {
+                selectedImageUri = it
+                showImagePreview = true
+            }
+        }
+        
+        // Camera permission launcher
+        val cameraPermissionLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { isGranted ->
+            if (isGranted) {
+                imageInputManager.createCameraImageUri()?.let { uri ->
+                    cameraLauncher.launch(uri)
+                }
+            } else {
+                Toast.makeText(context, "Camera permission required", Toast.LENGTH_SHORT).show()
+            }
+        }
         
         // Permission launcher for microphone
         val permissionLauncher = rememberLauncherForActivityResult(
@@ -849,6 +861,55 @@ class MainActivity : ComponentActivity() {
             } else {
                 Toast.makeText(context, "Microphone permission required for voice input", Toast.LENGTH_SHORT).show()
             }
+        }
+        
+        // Image source bottom sheet
+        if (showImageSourceSheet) {
+            androidx.compose.material3.ModalBottomSheet(
+                onDismissRequest = { showImageSourceSheet = false }
+            ) {
+                io.shubham0204.startwithsmollm.ui.ImageSourceBottomSheet(
+                    onCameraClick = {
+                        showImageSourceSheet = false
+                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                            imageInputManager.createCameraImageUri()?.let { uri ->
+                                cameraLauncher.launch(uri)
+                            }
+                        } else {
+                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                        }
+                    },
+                    onGalleryClick = {
+                        showImageSourceSheet = false
+                        galleryLauncher.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    },
+                    onDismiss = { showImageSourceSheet = false }
+                )
+            }
+        }
+        
+        // Image preview dialog
+        val currentImageUri = selectedImageUri
+        if (showImagePreview && currentImageUri != null) {
+            io.shubham0204.startwithsmollm.ui.ImagePreviewDialog(
+                imageUri = currentImageUri,
+                extractedText = extractedImageText,
+                isProcessing = isProcessingImage,
+                onDismiss = {
+                    showImagePreview = false
+                    selectedImageUri = null
+                    extractedImageText = null
+                    isProcessingImage = false
+                },
+                onSend = { question ->
+                    // Pass pre-extracted text to skip redundant OCR in ViewModel
+                    val preExtracted = extractedImageText?.takeIf { it.isNotBlank() }
+                    onImageQuery(currentImageUri, question, preExtracted)
+                    showImagePreview = false
+                    selectedImageUri = null
+                    extractedImageText = null
+                }
+            )
         }
         
         Surface(
@@ -961,6 +1022,19 @@ class MainActivity : ComponentActivity() {
                                     },
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                            },
+                            leadingIcon = {
+                                IconButton(
+                                    onClick = { showImageSourceSheet = true },
+                                    enabled = modelLoadingState == ModelLoadingState.SUCCESS &&
+                                              modelInferenceState != ModelInferenceState.LOADING
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CameraAlt,
+                                        contentDescription = "Add image",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             },
                             colors = androidx.compose.material3.TextFieldDefaults.colors(
                                 focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,

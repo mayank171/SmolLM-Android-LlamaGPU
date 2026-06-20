@@ -29,6 +29,11 @@ class LoggingObserver(
     override fun onEvent(event: ProfilingEvent) {
         when (event) {
             is ProfilingEvent.LatencyMeasured -> {
+                // Skip per-token Inter-Token Latency events from logcat. They fire on
+                // EVERY generated token (hundreds per response) and the string
+                // interpolation + logcat write measurably slows down decoding on CPU
+                // inference. DashboardObserver still receives them for the UI stats.
+                if (event.operation == "itl") return
                 val emoji = when {
                     event.durationMs < 50 -> "⚡"
                     event.durationMs < 100 -> "✅"
@@ -38,6 +43,9 @@ class LoggingObserver(
                 Log.d(tag, "$emoji [${event.component}] ${event.operation}: ${event.durationMs}ms")
             }
             is ProfilingEvent.MemoryMeasured -> {
+                // Skip periodic sampling events — they're for the dashboard, not logcat.
+                // Logging them every sample flooded logcat (RAGProfiler spam) and burned CPU.
+                if (event.operation == "sample") return
                 val usedMb = event.usedBytes / 1024 / 1024
                 val totalMb = event.totalBytes / 1024 / 1024
                 Log.d(tag, "💾 [${event.component}] Memory: ${usedMb}MB / ${totalMb}MB")
