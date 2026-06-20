@@ -126,8 +126,6 @@ sealed interface AppEvent {
     data object BackFromRagBenchmark : AppEvent
     data class PickRagBenchmarkUri(val uri: Uri) : AppEvent
     data object StartRagBenchmark : AppEvent
-    // Bluetooth events
-    data class ReceiveBluetoothResponse(val response: String) : AppEvent
     // Image input events
     data class ProcessImageQuery(val imageUri: Uri, val question: String, val preExtractedText: String? = null) : AppEvent
 }
@@ -306,25 +304,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             is AppEvent.BackFromRagBenchmark -> backFromRagBenchmark()
             is AppEvent.PickRagBenchmarkUri -> pickRagBenchmarkUri(event.uri)
             is AppEvent.StartRagBenchmark -> startRagBenchmark()
-            // Bluetooth events
-            is AppEvent.ReceiveBluetoothResponse -> receiveBluetoothResponse(event.response)
             // Image input events
             is AppEvent.ProcessImageQuery -> processImageQuery(event.imageUri, event.question, event.preExtractedText)
-        }
-    }
-    
-    private fun receiveBluetoothResponse(response: String) {
-        _appStateFlow.update { state ->
-            val newMessages = state.chatState.messages + ChatMessage(
-                content = response,
-                userRole = UserRole.LLM
-            )
-            state.copy(
-                chatState = state.chatState.copy(
-                    messages = newMessages.toImmutableList(),
-                    modelInferenceState = ModelInferenceState.IDLE
-                )
-            )
         }
     }
     

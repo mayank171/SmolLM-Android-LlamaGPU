@@ -47,7 +47,6 @@ import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.Analytics
-import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Star
@@ -79,7 +78,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.shubham0204.startwithsmollm.ui.BenchmarkScreen
-import io.shubham0204.startwithsmollm.ui.BluetoothDeviceSelectionDialog
 import io.shubham0204.startwithsmollm.ui.InferenceInsightsScreen
 import io.shubham0204.startwithsmollm.ui.MarkdownText
 import io.shubham0204.startwithsmollm.ui.ModelSelectionScreen
@@ -88,11 +86,6 @@ import io.shubham0204.startwithsmollm.ui.RagBenchmarkScreen
 import io.shubham0204.startwithsmollm.ui.theme.SmolLMStarterTemplateTheme
 import io.shubham0204.startwithsmollm.voice.VoiceManager
 import io.shubham0204.startwithsmollm.data.ExpertMode
-import io.shubham0204.startwithsmollm.bluetooth.BluetoothInferenceClient
-import io.shubham0204.startwithsmollm.bluetooth.BluetoothInferenceServer
-import io.shubham0204.startwithsmollm.bluetooth.DeviceInfo
-import kotlinx.coroutines.launch
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.lifecycle.viewModelScope
 import kotlinx.collections.immutable.ImmutableList
 import android.Manifest
@@ -113,54 +106,7 @@ class MainActivity : ComponentActivity() {
             SmolLMStarterTemplateTheme {
                 val appState by viewModel.appStateFlow.collectAsState()
                 val context = LocalContext.current
-                
-                // Bluetooth state
-                var showBluetoothDialog by remember { mutableStateOf(false) }
-                var bluetoothDevices by remember { mutableStateOf<List<DeviceInfo>>(emptyList()) }
-                var isDiscovering by remember { mutableStateOf(false) }
-                val bluetoothClient = remember { BluetoothInferenceClient(context) }
-                val coroutineScope = rememberCoroutineScope()
-                
-                // Local toast state for ad-hoc messages (bluetooth errors, permissions)
-                var localToastMessage by remember { mutableStateOf<String?>(null) }
-                var localToastType by remember { mutableStateOf(io.shubham0204.startwithsmollm.ui.ToastType.INFO) }
-                
-                // Bluetooth device selection dialog
-                if (showBluetoothDialog) {
-                    BluetoothDeviceSelectionDialog(
-                        devices = bluetoothDevices,
-                        isLoading = isDiscovering,
-                        onDeviceSelected = { device ->
-                            showBluetoothDialog = false
-                            // Get current message to send
-                            val lastMessage = appState.chatState.messages.lastOrNull()?.content ?: ""
-                            if (lastMessage.isNotEmpty()) {
-                                coroutineScope.launch {
-                                    val response = bluetoothClient.sendInferenceRequest(
-                                        deviceAddress = device.deviceAddress,
-                                        prompt = lastMessage,
-                                        modelName = appState.chatState.currentModelName
-                                    )
-                                    if (response.success) {
-                                        viewModel.onEvent(AppEvent.ReceiveBluetoothResponse(response.text))
-                                    } else {
-                                        localToastMessage = "Bluetooth inference failed: ${response.errorMessage}"
-                                        localToastType = io.shubham0204.startwithsmollm.ui.ToastType.ERROR
-                                    }
-                                }
-                            }
-                        },
-                        onDismiss = { showBluetoothDialog = false },
-                        onRefresh = {
-                            coroutineScope.launch {
-                                isDiscovering = true
-                                bluetoothDevices = bluetoothClient.discoverDevices()
-                                isDiscovering = false
-                            }
-                        }
-                    )
-                }
-                
+
                 androidx.compose.foundation.layout.Box(modifier = androidx.compose.ui.Modifier.fillMaxSize()) {
                 AnimatedContent(
                     targetState = appState.currentScreen,
@@ -214,14 +160,6 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onBenchmarkClick = {
                                     viewModel.onEvent(AppEvent.OpenBenchmark)
-                                },
-                                onBluetoothClick = {
-                                    showBluetoothDialog = true
-                                    coroutineScope.launch {
-                                        isDiscovering = true
-                                        bluetoothDevices = bluetoothClient.discoverDevices()
-                                        isDiscovering = false
-                                    }
                                 },
                                 onRagClick = {
                                     viewModel.onEvent(AppEvent.OpenRag)
@@ -318,17 +256,9 @@ class MainActivity : ComponentActivity() {
                 
                 // Themed toast overlay (covers all screens)
                 io.shubham0204.startwithsmollm.ui.AppToastHost(
-                    message = appState.chatState.toastMessage ?: localToastMessage,
-                    type = if (appState.chatState.toastMessage != null)
-                        io.shubham0204.startwithsmollm.ui.ToastType.INFO
-                    else localToastType,
-                    onDismiss = {
-                        if (appState.chatState.toastMessage != null) {
-                            viewModel.onEvent(AppEvent.ClearToast)
-                        } else {
-                            localToastMessage = null
-                        }
-                    }
+                    message = appState.chatState.toastMessage,
+                    type = io.shubham0204.startwithsmollm.ui.ToastType.INFO,
+                    onDismiss = { viewModel.onEvent(AppEvent.ClearToast) }
                 )
                 } // end Box
             }
@@ -347,7 +277,6 @@ class MainActivity : ComponentActivity() {
         onQuerySubmit: (String) -> Unit,
         onClearChat: () -> Unit,
         onBenchmarkClick: () -> Unit,
-        onBluetoothClick: () -> Unit = {},
         onRagClick: () -> Unit = {},
         onStartVoiceInput: () -> Unit = {},
         onStopVoiceInput: () -> Unit = {},
@@ -463,16 +392,6 @@ class MainActivity : ComponentActivity() {
                                     onClick = {
                                         showOverflowMenu = false
                                         onBenchmarkClick()
-                                    }
-                                )
-                                androidx.compose.material3.DropdownMenuItem(
-                                    text = { Text("Bluetooth inference") },
-                                    leadingIcon = {
-                                        Icon(Icons.Default.Bluetooth, contentDescription = null)
-                                    },
-                                    onClick = {
-                                        showOverflowMenu = false
-                                        onBluetoothClick()
                                     }
                                 )
                                 if (isExpertMode) {

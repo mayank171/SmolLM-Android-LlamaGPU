@@ -29,6 +29,11 @@ class LoggingObserver(
     override fun onEvent(event: ProfilingEvent) {
         when (event) {
             is ProfilingEvent.LatencyMeasured -> {
+                // Skip per-token Inter-Token Latency events from logcat. They fire on
+                // EVERY generated token (hundreds per response) and the string
+                // interpolation + logcat write measurably slows down decoding on CPU
+                // inference. DashboardObserver still receives them for the UI stats.
+                if (event.operation == "itl") return
                 val emoji = when {
                     event.durationMs < 50 -> "⚡"
                     event.durationMs < 100 -> "✅"

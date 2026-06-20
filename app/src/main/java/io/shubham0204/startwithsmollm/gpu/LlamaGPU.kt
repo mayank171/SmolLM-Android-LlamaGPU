@@ -93,7 +93,14 @@ class LlamaGPU {
         val numThreads: Int = 4,
         val useMmap: Boolean = true,
         val useMlock: Boolean = false,
-        // GPU (disabled - Vulkan crashes on Adreno)
+        // GPU (Vulkan backend is built into the .so but disabled by default).
+        //
+        // The ggml-vulkan backend crashes (SIGSEGV in vulkan tensor alloc) on
+        // certain Adreno GPUs during ggml_backend_alloc_ctx_tensors_from_buft.
+        // This is a driver-level bug, not in our code. Until a per-device
+        // allowlist or working detection exists, ship with GPU off by default.
+        //
+        // To experiment on other devices: flip these to (true, -1).
         val useGPU: Boolean = false,
         val gpuLayers: Int = 0,
         // Performance optimizations
