@@ -3,7 +3,7 @@
 An Android application for running Small Language Models (SLMs) locally on your device. This project extends the original [SmolLM-Android-Starter-Template](https://github.com/shubham0204/SmolLM-Android-Starter-Template) with a custom JNI wrapper for llama.cpp, providing an alternative inference path.
 
 <p align="center">
-  <img src="screenshots/app_preview.png" alt="App Preview" width="300"/>
+  <img src="'preview.jpeg'" alt="App Preview" width="300"/>
 </p>
 
 ## Features
